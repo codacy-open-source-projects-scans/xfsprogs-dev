@@ -188,26 +188,6 @@ enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
 #define xfs_info_once(dev, fmt, ...)				\
 	xfs_printk_once(xfs_info, dev, fmt, ##__VA_ARGS__)
 
-#ifdef __GNUC__
-#define __return_address	__builtin_return_address(0)
-
-/*
- * Return the address of a label.  Use barrier() so that the optimizer
- * won't reorder code to refactor the error jumpouts into a single
- * return, which throws off the reported address.
- */
-#define __this_address  ({ __label__ __here; __here: barrier(); &&__here; })
-/* Optimization barrier */
-
-/* The "volatile" is due to gcc bugs */
-#define barrier() __asm__ __volatile__("": : :"memory")
-#endif
-
-/* Optimization barrier */
-#ifndef barrier
-# define barrier() __memory_barrier()
-#endif
-
 /* miscellaneous kernel routines not in user space */
 #define likely(x)		(x)
 #define unlikely(x)		(x)
@@ -221,9 +201,6 @@ static inline bool WARN_ON(bool expr) {
 #define percpu_counter_read(x)		(*x)
 #define percpu_counter_read_positive(x)	((*x) > 0 ? (*x) : 0)
 #define percpu_counter_sum(x)		(*x)
-
-#define READ_ONCE(x)			(x)
-#define WRITE_ONCE(x, val)		((x) = (val))
 
 /*
  * get_random_u32 is used for di_gen inode allocation, it must be zero for
@@ -612,8 +589,10 @@ int libxfs_zero_extent(struct xfs_inode *ip, xfs_fsblock_t start_fsb,
                         xfs_off_t count_fsb);
 
 /* xfs_log.c */
+struct xfs_item_ops;
 bool xfs_log_check_lsn(struct xfs_mount *, xfs_lsn_t);
-void xfs_log_item_init(struct xfs_mount *, struct xfs_log_item *, int);
+void xfs_log_item_init(struct xfs_mount *mp, struct xfs_log_item *lip, int type,
+		const struct xfs_item_ops *ops);
 #define xfs_attr_use_log_assist(mp)	(0)
 #define xlog_drop_incompat_feat(log)	do { } while (0)
 #define xfs_log_in_recovery(mp)		(false)

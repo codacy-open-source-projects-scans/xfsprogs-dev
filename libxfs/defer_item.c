@@ -33,17 +33,16 @@
 static int
 xfs_extent_free_diff_items(
 	void				*priv,
-	struct list_head		*a,
-	struct list_head		*b)
+	const struct list_head		*a,
+	const struct list_head		*b)
 {
-	struct xfs_mount		*mp = priv;
-	struct xfs_extent_free_item	*ra;
-	struct xfs_extent_free_item	*rb;
+	const struct xfs_extent_free_item *ra;
+	const struct xfs_extent_free_item *rb;
 
 	ra = container_of(a, struct xfs_extent_free_item, xefi_list);
 	rb = container_of(b, struct xfs_extent_free_item, xefi_list);
-	return  XFS_FSB_TO_AGNO(mp, ra->xefi_startblock) -
-		XFS_FSB_TO_AGNO(mp, rb->xefi_startblock);
+
+	return ra->xefi_pag->pag_agno - rb->xefi_pag->pag_agno;
 }
 
 /* Get an EFI. */
@@ -71,6 +70,26 @@ xfs_extent_free_create_done(
 	return NULL;
 }
 
+/* Take an active ref to the AG containing the space we're freeing. */
+void
+xfs_extent_free_get_group(
+	struct xfs_mount		*mp,
+	struct xfs_extent_free_item	*xefi)
+{
+	xfs_agnumber_t			agno;
+
+	agno = XFS_FSB_TO_AGNO(mp, xefi->xefi_startblock);
+	xefi->xefi_pag = xfs_perag_intent_get(mp, agno);
+}
+
+/* Release an active AG ref after some freeing work. */
+static inline void
+xfs_extent_free_put_group(
+	struct xfs_extent_free_item	*xefi)
+{
+	xfs_perag_intent_put(xefi->xefi_pag);
+}
+
 /* Process a free extent. */
 STATIC int
 xfs_extent_free_finish_item(
@@ -80,18 +99,24 @@ xfs_extent_free_finish_item(
 	struct xfs_btree_cur		**state)
 {
 	struct xfs_owner_info		oinfo = { };
-	struct xfs_extent_free_item	*free;
+	struct xfs_extent_free_item	*xefi;
+	xfs_agblock_t			agbno;
 	int				error;
 
-	free = container_of(item, struct xfs_extent_free_item, xefi_list);
-	oinfo.oi_owner = free->xefi_owner;
-	if (free->xefi_flags & XFS_EFI_ATTR_FORK)
+	xefi = container_of(item, struct xfs_extent_free_item, xefi_list);
+
+	oinfo.oi_owner = xefi->xefi_owner;
+	if (xefi->xefi_flags & XFS_EFI_ATTR_FORK)
 		oinfo.oi_flags |= XFS_OWNER_INFO_ATTR_FORK;
-	if (free->xefi_flags & XFS_EFI_BMBT_BLOCK)
+	if (xefi->xefi_flags & XFS_EFI_BMBT_BLOCK)
 		oinfo.oi_flags |= XFS_OWNER_INFO_BMBT_BLOCK;
-	error = xfs_free_extent(tp, free->xefi_startblock,
-		free->xefi_blockcount, &oinfo, XFS_AG_RESV_NONE);
-	kmem_cache_free(xfs_extfree_item_cache, free);
+
+	agbno = XFS_FSB_TO_AGBNO(tp->t_mountp, xefi->xefi_startblock);
+	error = xfs_free_extent(tp, xefi->xefi_pag, agbno,
+			xefi->xefi_blockcount, &oinfo, XFS_AG_RESV_NONE);
+
+	xfs_extent_free_put_group(xefi);
+	kmem_cache_free(xfs_extfree_item_cache, xefi);
 	return error;
 }
 
@@ -107,10 +132,12 @@ STATIC void
 xfs_extent_free_cancel_item(
 	struct list_head		*item)
 {
-	struct xfs_extent_free_item	*free;
+	struct xfs_extent_free_item	*xefi;
 
-	free = container_of(item, struct xfs_extent_free_item, xefi_list);
-	kmem_cache_free(xfs_extfree_item_cache, free);
+	xefi = container_of(item, struct xfs_extent_free_item, xefi_list);
+
+	xfs_extent_free_put_group(xefi);
+	kmem_cache_free(xfs_extfree_item_cache, xefi);
 }
 
 const struct xfs_defer_op_type xfs_extent_free_defer_type = {
@@ -134,25 +161,24 @@ xfs_agfl_free_finish_item(
 {
 	struct xfs_owner_info		oinfo = { };
 	struct xfs_mount		*mp = tp->t_mountp;
-	struct xfs_extent_free_item	*free;
+	struct xfs_extent_free_item	*xefi;
 	struct xfs_buf			*agbp;
-	struct xfs_perag		*pag;
 	int				error;
-	xfs_agnumber_t			agno;
 	xfs_agblock_t			agbno;
 
-	free = container_of(item, struct xfs_extent_free_item, xefi_list);
-	ASSERT(free->xefi_blockcount == 1);
-	agno = XFS_FSB_TO_AGNO(mp, free->xefi_startblock);
-	agbno = XFS_FSB_TO_AGBNO(mp, free->xefi_startblock);
-	oinfo.oi_owner = free->xefi_owner;
+	xefi = container_of(item, struct xfs_extent_free_item, xefi_list);
 
-	pag = libxfs_perag_get(mp, agno);
-	error = xfs_alloc_read_agf(pag, tp, 0, &agbp);
+	ASSERT(xefi->xefi_blockcount == 1);
+	agbno = XFS_FSB_TO_AGBNO(mp, xefi->xefi_startblock);
+	oinfo.oi_owner = xefi->xefi_owner;
+
+	error = xfs_alloc_read_agf(xefi->xefi_pag, tp, 0, &agbp);
 	if (!error)
-		error = xfs_free_agfl_block(tp, agno, agbno, agbp, &oinfo);
-	libxfs_perag_put(pag);
-	kmem_cache_free(xfs_extfree_item_cache, free);
+		error = xfs_free_agfl_block(tp, xefi->xefi_pag->pag_agno,
+				agbno, agbp, &oinfo);
+
+	xfs_extent_free_put_group(xefi);
+	kmem_cache_free(xfs_extfree_item_cache, xefi);
 	return error;
 }
 
@@ -171,17 +197,16 @@ const struct xfs_defer_op_type xfs_agfl_free_defer_type = {
 static int
 xfs_rmap_update_diff_items(
 	void				*priv,
-	struct list_head		*a,
-	struct list_head		*b)
+	const struct list_head		*a,
+	const struct list_head		*b)
 {
-	struct xfs_mount		*mp = priv;
-	struct xfs_rmap_intent		*ra;
-	struct xfs_rmap_intent		*rb;
+	const struct xfs_rmap_intent	*ra;
+	const struct xfs_rmap_intent	*rb;
 
 	ra = container_of(a, struct xfs_rmap_intent, ri_list);
 	rb = container_of(b, struct xfs_rmap_intent, ri_list);
-	return  XFS_FSB_TO_AGNO(mp, ra->ri_bmap.br_startblock) -
-		XFS_FSB_TO_AGNO(mp, rb->ri_bmap.br_startblock);
+
+	return ra->ri_pag->pag_agno - rb->ri_pag->pag_agno;
 }
 
 /* Get an RUI. */
@@ -209,6 +234,26 @@ xfs_rmap_update_create_done(
 	return NULL;
 }
 
+/* Take an active ref to the AG containing the space we're rmapping. */
+void
+xfs_rmap_update_get_group(
+	struct xfs_mount	*mp,
+	struct xfs_rmap_intent	*ri)
+{
+	xfs_agnumber_t	agno;
+
+	agno = XFS_FSB_TO_AGNO(mp, ri->ri_bmap.br_startblock);
+	ri->ri_pag = xfs_perag_intent_get(mp, agno);
+}
+
+/* Release an active AG ref after finishing rmapping work. */
+static inline void
+xfs_rmap_update_put_group(
+	struct xfs_rmap_intent	*ri)
+{
+	xfs_perag_intent_put(ri->ri_pag);
+}
+
 /* Process a deferred rmap update. */
 STATIC int
 xfs_rmap_update_finish_item(
@@ -221,7 +266,10 @@ xfs_rmap_update_finish_item(
 	int				error;
 
 	ri = container_of(item, struct xfs_rmap_intent, ri_list);
+
 	error = xfs_rmap_finish_one(tp, ri, state);
+
+	xfs_rmap_update_put_group(ri);
 	kmem_cache_free(xfs_rmap_intent_cache, ri);
 	return error;
 }
@@ -241,6 +289,8 @@ xfs_rmap_update_cancel_item(
 	struct xfs_rmap_intent		*ri;
 
 	ri = container_of(item, struct xfs_rmap_intent, ri_list);
+
+	xfs_rmap_update_put_group(ri);
 	kmem_cache_free(xfs_rmap_intent_cache, ri);
 }
 
@@ -259,17 +309,16 @@ const struct xfs_defer_op_type xfs_rmap_update_defer_type = {
 static int
 xfs_refcount_update_diff_items(
 	void				*priv,
-	struct list_head		*a,
-	struct list_head		*b)
+	const struct list_head		*a,
+	const struct list_head		*b)
 {
-	struct xfs_mount		*mp = priv;
-	struct xfs_refcount_intent	*ra;
-	struct xfs_refcount_intent	*rb;
+	const struct xfs_refcount_intent *ra;
+	const struct xfs_refcount_intent *rb;
 
 	ra = container_of(a, struct xfs_refcount_intent, ri_list);
 	rb = container_of(b, struct xfs_refcount_intent, ri_list);
-	return  XFS_FSB_TO_AGNO(mp, ra->ri_startblock) -
-		XFS_FSB_TO_AGNO(mp, rb->ri_startblock);
+
+	return ra->ri_pag->pag_agno - rb->ri_pag->pag_agno;
 }
 
 /* Get an CUI. */
@@ -297,6 +346,26 @@ xfs_refcount_update_create_done(
 	return NULL;
 }
 
+/* Take an active ref to the AG containing the space we're refcounting. */
+void
+xfs_refcount_update_get_group(
+	struct xfs_mount		*mp,
+	struct xfs_refcount_intent	*ri)
+{
+	xfs_agnumber_t			agno;
+
+	agno = XFS_FSB_TO_AGNO(mp, ri->ri_startblock);
+	ri->ri_pag = xfs_perag_intent_get(mp, agno);
+}
+
+/* Release an active AG ref after finishing refcounting work. */
+static inline void
+xfs_refcount_update_put_group(
+	struct xfs_refcount_intent	*ri)
+{
+	xfs_perag_intent_put(ri->ri_pag);
+}
+
 /* Process a deferred refcount update. */
 STATIC int
 xfs_refcount_update_finish_item(
@@ -317,6 +386,8 @@ xfs_refcount_update_finish_item(
 		       ri->ri_type == XFS_REFCOUNT_DECREASE);
 		return -EAGAIN;
 	}
+
+	xfs_refcount_update_put_group(ri);
 	kmem_cache_free(xfs_refcount_intent_cache, ri);
 	return error;
 }
@@ -336,6 +407,8 @@ xfs_refcount_update_cancel_item(
 	struct xfs_refcount_intent	*ri;
 
 	ri = container_of(item, struct xfs_refcount_intent, ri_list);
+
+	xfs_refcount_update_put_group(ri);
 	kmem_cache_free(xfs_refcount_intent_cache, ri);
 }
 
@@ -354,11 +427,11 @@ const struct xfs_defer_op_type xfs_refcount_update_defer_type = {
 static int
 xfs_bmap_update_diff_items(
 	void				*priv,
-	struct list_head		*a,
-	struct list_head		*b)
+	const struct list_head		*a,
+	const struct list_head		*b)
 {
-	struct xfs_bmap_intent		*ba;
-	struct xfs_bmap_intent		*bb;
+	const struct xfs_bmap_intent	*ba;
+	const struct xfs_bmap_intent	*bb;
 
 	ba = container_of(a, struct xfs_bmap_intent, bi_list);
 	bb = container_of(b, struct xfs_bmap_intent, bi_list);
@@ -390,6 +463,34 @@ xfs_bmap_update_create_done(
 	return NULL;
 }
 
+/* Take an active ref to the AG containing the space we're mapping. */
+void
+xfs_bmap_update_get_group(
+	struct xfs_mount	*mp,
+	struct xfs_bmap_intent	*bi)
+{
+	xfs_agnumber_t		agno;
+
+	agno = XFS_FSB_TO_AGNO(mp, bi->bi_bmap.br_startblock);
+
+	/*
+	 * Bump the intent count on behalf of the deferred rmap and refcount
+	 * intent items that that we can queue when we finish this bmap work.
+	 * This new intent item will bump the intent count before the bmap
+	 * intent drops the intent count, ensuring that the intent count
+	 * remains nonzero across the transaction roll.
+	 */
+	bi->bi_pag = xfs_perag_intent_get(mp, agno);
+}
+
+/* Release an active AG ref after finishing mapping work. */
+static inline void
+xfs_bmap_update_put_group(
+	struct xfs_bmap_intent	*bi)
+{
+	xfs_perag_intent_put(bi->bi_pag);
+}
+
 /* Process a deferred rmap update. */
 STATIC int
 xfs_bmap_update_finish_item(
@@ -407,6 +508,8 @@ xfs_bmap_update_finish_item(
 		ASSERT(bi->bi_type == XFS_BMAP_UNMAP);
 		return -EAGAIN;
 	}
+
+	xfs_bmap_update_put_group(bi);
 	kmem_cache_free(xfs_bmap_intent_cache, bi);
 	return error;
 }
@@ -426,6 +529,8 @@ xfs_bmap_update_cancel_item(
 	struct xfs_bmap_intent		*bi;
 
 	bi = container_of(item, struct xfs_bmap_intent, bi_list);
+
+	xfs_bmap_update_put_group(bi);
 	kmem_cache_free(xfs_bmap_intent_cache, bi);
 }
 

@@ -834,7 +834,7 @@ next_readbuf:
 			do_warn(
 	_("imap claims inode %" PRIu64 " is present, but inode cluster is sparse, "),
 						ino);
-			if (verbose || !no_modify)
+			if (!no_modify)
 				do_warn(_("correcting imap\n"));
 			else
 				do_warn(_("would correct imap\n"));
@@ -871,13 +871,11 @@ next_readbuf:
 		 */
 		if (is_used)  {
 			if (is_inode_free(ino_rec, irec_offset))  {
-				if (verbose || no_modify)  {
-					do_warn(
+				do_warn(
 	_("imap claims in-use inode %" PRIu64 " is free, "),
 						ino);
-				}
 
-				if (verbose || !no_modify)
+				if (!no_modify)
 					do_warn(_("correcting imap\n"));
 				else
 					do_warn(_("would correct imap\n"));
@@ -1289,10 +1287,12 @@ process_uncertain_aginodes(xfs_mount_t *mp, xfs_agnumber_t agno)
 			 * process the inode record we just added
 			 * to the good inode tree.  The inode
 			 * processing may add more records to the
-			 * uncertain inode lists.
+			 * uncertain inode lists.  always process the
+			 * extended attribute structure because we might
+			 * decide that some inodes are still in use
 			 */
 			if (process_inode_chunk(mp, agno, igeo->ialloc_inos,
-						nrec, 1, 0, 0, &bogus))  {
+						nrec, 1, 0, 1, &bogus))  {
 				/* XXX - i/o error, we've got a problem */
 				abort();
 			}
