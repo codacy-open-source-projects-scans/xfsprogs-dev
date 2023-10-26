@@ -4134,14 +4134,14 @@ main(
 			.dirftype = true,
 			.finobt = true,
 			.spinodes = true,
-			.rmapbt = false,
+			.rmapbt = true,
 			.reflink = true,
 			.inobtcnt = true,
 			.parent_pointers = false,
 			.nodalign = false,
 			.nortalign = false,
 			.bigtime = true,
-			.nrext64 = false,
+			.nrext64 = true,
 			/*
 			 * When we decide to enable a new feature by default,
 			 * please remember to update the mkfs conf files.

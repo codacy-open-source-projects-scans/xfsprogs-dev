@@ -1,4 +1,4 @@
-AC_INIT([xfsprogs],[6.4.0],[linux-xfs@vger.kernel.org])
+AC_INIT([xfsprogs],[6.5.0],[linux-xfs@vger.kernel.org])
 AC_PREREQ([2.69])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_MACRO_DIR([m4])
@@ -209,6 +209,7 @@ AC_HAVE_SG_IO
 AC_HAVE_HDIO_GETGEO
 AC_CONFIG_SYSTEMD_SYSTEM_UNIT_DIR
 AC_CONFIG_CROND_DIR
+AC_CONFIG_UDEV_RULE_DIR
 
 if test "$enable_blkid" = yes; then
 AC_HAVE_BLKID_TOPO
