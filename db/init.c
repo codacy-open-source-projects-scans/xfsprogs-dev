@@ -19,7 +19,6 @@
 
 static char		**cmdline;
 static int		ncmdline;
-char			*fsdevice;
 int			blkbb;
 int			exitcode;
 int			expert_mode;
@@ -28,6 +27,7 @@ static struct xfs_mount	xmount;
 struct xfs_mount	*mp;
 static struct xlog	xlog;
 xfs_agnumber_t		cur_agno = NULLAGNUMBER;
+struct libxfs_init	x;
 
 static void
 usage(void)
@@ -61,22 +61,22 @@ init(
 			cmdline[ncmdline++] = optarg;
 			break;
 		case 'f':
-			x.disfile = 1;
+			x.data.isfile = 1;
 			break;
 		case 'F':
 			force = 1;
 			break;
 		case 'i':
-			x.isreadonly = (LIBXFS_ISREADONLY|LIBXFS_ISINACTIVE);
+			x.flags = LIBXFS_ISREADONLY | LIBXFS_ISINACTIVE;
 			break;
 		case 'p':
 			progname = optarg;
 			break;
 		case 'r':
-			x.isreadonly = LIBXFS_ISREADONLY;
+			x.flags = LIBXFS_ISREADONLY;
 			break;
 		case 'l':
-			x.logname = optarg;
+			x.log.name = optarg;
 			break;
 		case 'x':
 			expert_mode = 1;
@@ -91,12 +91,8 @@ init(
 	if (optind + 1 != argc)
 		usage();
 
-	fsdevice = argv[optind];
-	if (!x.disfile)
-		x.volname = fsdevice;
-	else
-		x.dname = fsdevice;
-	x.isdirect = LIBXFS_DIRECT;
+	x.data.name = argv[optind];
+	x.flags |= LIBXFS_DIRECT;
 
 	x.bcache_flags = CACHE_MISCOMPARE_PURGE;
 	if (!libxfs_init(&x)) {
@@ -110,12 +106,12 @@ init(
 	 * tool and so need to be able to mount busted filesystems.
 	 */
 	memset(&xmount, 0, sizeof(struct xfs_mount));
-	libxfs_buftarg_init(&xmount, x.ddev, x.logdev, x.rtdev);
+	libxfs_buftarg_init(&xmount, &x);
 	error = -libxfs_buf_read_uncached(xmount.m_ddev_targp, XFS_SB_DADDR,
 			1 << (XFS_MAX_SECTORSIZE_LOG - BBSHIFT), 0, &bp, NULL);
 	if (error) {
 		fprintf(stderr, _("%s: %s is invalid (cannot read first 512 "
-			"bytes)\n"), progname, fsdevice);
+			"bytes)\n"), progname, x.data.name);
 		exit(1);
 	}
 
@@ -126,7 +122,7 @@ init(
 	sbp = &xmount.m_sb;
 	if (sbp->sb_magicnum != XFS_SB_MAGIC) {
 		fprintf(stderr, _("%s: %s is not a valid XFS filesystem (unexpected SB magic number 0x%08x)\n"),
-			progname, fsdevice, sbp->sb_magicnum);
+			progname, x.data.name, sbp->sb_magicnum);
 		if (!force) {
 			fprintf(stderr, _("Use -F to force a read attempt.\n"));
 			exit(EXIT_FAILURE);
@@ -134,12 +130,11 @@ init(
 	}
 
 	agcount = sbp->sb_agcount;
-	mp = libxfs_mount(&xmount, sbp, x.ddev, x.logdev, x.rtdev,
-			  LIBXFS_MOUNT_DEBUGGER);
+	mp = libxfs_mount(&xmount, sbp, &x, LIBXFS_MOUNT_DEBUGGER);
 	if (!mp) {
 		fprintf(stderr,
 			_("%s: device %s unusable (not an XFS filesystem?)\n"),
-			progname, fsdevice);
+			progname, x.data.name);
 		exit(1);
 	}
 	mp->m_log = &xlog;

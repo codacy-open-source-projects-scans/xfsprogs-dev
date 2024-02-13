@@ -127,20 +127,23 @@ platform_check_iswritable(char *name, char *block, struct stat *s)
 	return platform_check_mount(name, block, s, flags);
 }
 
-int
-platform_set_blocksize(int fd, char *path, dev_t device, int blocksize, int fatal)
+void
+platform_set_blocksize(int fd, char *path, dev_t device, int blocksize,
+		bool fatal)
 {
-	int error = 0;
+	int error;
 
-	if (major(device) != RAMDISK_MAJOR) {
-		if ((error = ioctl(fd, BLKBSZSET, &blocksize)) < 0) {
-			fprintf(stderr, _("%s: %s - cannot set blocksize "
-					"%d on block device %s: %s\n"),
-				progname, fatal ? "error": "warning",
-				blocksize, path, strerror(errno));
-		}
+	if (major(device) == RAMDISK_MAJOR)
+		return;
+	error = ioctl(fd, BLKBSZSET, &blocksize);
+	if (error < 0) {
+		fprintf(stderr, _("%s: %s - cannot set blocksize "
+				"%d on block device %s: %s\n"),
+			progname, fatal ? "error": "warning",
+			blocksize, path, strerror(errno));
+		if (fatal)
+			exit(1);
 	}
-	return error;
 }
 
 /*
@@ -230,18 +233,6 @@ platform_findsizes(char *path, int fd, long long *sz, int *bsz)
 	}
 	if (*bsz > max_block_alignment)
 		max_block_alignment = *bsz;
-}
-
-char *
-platform_findrawpath(char *path)
-{
-	return path;
-}
-
-char *
-platform_findblockpath(char *path)
-{
-	return path;
 }
 
 int

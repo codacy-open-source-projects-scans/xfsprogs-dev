@@ -43,7 +43,7 @@ struct inode {
 	uint64_t		i_version;
 	struct timespec64	i_atime;
 	struct timespec64	i_mtime;
-	struct timespec64	i_ctime;
+	struct timespec64	__i_ctime; /* use inode_*_ctime accessors! */
 	spinlock_t		i_lock;
 };
 
@@ -67,6 +67,28 @@ static inline void i_gid_write(struct inode *inode, uint32_t gid)
 static inline void ihold(struct inode *inode)
 {
 	inode->i_count++;
+}
+
+static inline struct timespec64 inode_get_ctime(const struct inode *inode)
+{
+	return inode->__i_ctime;
+}
+
+static inline struct timespec64 inode_set_ctime_to_ts(struct inode *inode,
+						     struct timespec64 ts)
+{
+	inode->__i_ctime = ts;
+	return ts;
+}
+
+extern struct timespec64 current_time(struct inode *inode);
+
+static inline struct timespec64 inode_set_ctime_current(struct inode *inode)
+{
+	struct timespec64 now = current_time(inode);
+
+	inode_set_ctime_to_ts(inode, now);
+	return now;
 }
 
 typedef struct xfs_inode {
@@ -250,8 +272,6 @@ extern void	libxfs_trans_inode_alloc_buf (struct xfs_trans *,
 extern void	libxfs_trans_ichgtime(struct xfs_trans *,
 				struct xfs_inode *, int);
 extern int	libxfs_iflush_int (struct xfs_inode *, struct xfs_buf *);
-
-extern struct timespec64 current_time(struct inode *inode);
 
 /* Inode Cache Interfaces */
 extern int	libxfs_iget(struct xfs_mount *, struct xfs_trans *, xfs_ino_t,

@@ -286,46 +286,47 @@ static void blkid_get_topology(
 
 #endif /* ENABLE_BLKID */
 
-void get_topology(
-	libxfs_init_t		*xi,
+void
+get_topology(
+	struct libxfs_init	*xi,
 	struct fs_topology	*ft,
 	int			force_overwrite)
 {
 	struct stat statbuf;
-	char *dfile = xi->volname ? xi->volname : xi->dname;
 
 	/*
 	 * If our target is a regular file, use platform_findsizes
 	 * to try to obtain the underlying filesystem's requirements
 	 * for direct IO; we'll set our sector size to that if possible.
 	 */
-	if (xi->disfile ||
-	    (!stat(dfile, &statbuf) && S_ISREG(statbuf.st_mode))) {
+	if (xi->data.isfile ||
+	    (!stat(xi->data.name, &statbuf) && S_ISREG(statbuf.st_mode))) {
 		int fd;
 		int flags = O_RDONLY;
 		long long dummy;
 
 		/* with xi->disfile we may not have the file yet! */
-		if (xi->disfile)
+		if (xi->data.isfile)
 			flags |= O_CREAT;
 
-		fd = open(dfile, flags, 0666);
+		fd = open(xi->data.name, flags, 0666);
 		if (fd >= 0) {
-			platform_findsizes(dfile, fd, &dummy, &ft->lsectorsize);
+			platform_findsizes(xi->data.name, fd, &dummy,
+					&ft->lsectorsize);
 			close(fd);
 			ft->psectorsize = ft->lsectorsize;
 		} else
 			ft->psectorsize = ft->lsectorsize = BBSIZE;
 	} else {
-		blkid_get_topology(dfile, &ft->dsunit, &ft->dswidth,
+		blkid_get_topology(xi->data.name, &ft->dsunit, &ft->dswidth,
 				   &ft->lsectorsize, &ft->psectorsize,
 				   force_overwrite);
 	}
 
-	if (xi->rtname && !xi->risfile) {
+	if (xi->rt.name && !xi->rt.isfile) {
 		int sunit, lsectorsize, psectorsize;
 
-		blkid_get_topology(xi->rtname, &sunit, &ft->rtswidth,
+		blkid_get_topology(xi->rt.name, &sunit, &ft->rtswidth,
 				   &lsectorsize, &psectorsize, force_overwrite);
 	}
 }

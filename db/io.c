@@ -137,18 +137,47 @@ pop_help(void)
 		));
 }
 
+bool
+iocur_is_ddev(const struct iocur *ioc)
+{
+	if (!ioc->bp)
+		return false;
+
+	return ioc->bp->b_target == ioc->bp->b_mount->m_ddev_targp;
+}
+
+bool
+iocur_is_extlogdev(const struct iocur *ioc)
+{
+	struct xfs_buf	*bp = ioc->bp;
+
+	if (!bp)
+		return false;
+	if (bp->b_mount->m_logdev_targp == bp->b_mount->m_ddev_targp)
+		return false;
+
+	return bp->b_target == bp->b_mount->m_logdev_targp;
+}
+
 void
 print_iocur(
 	char	*tag,
 	iocur_t	*ioc)
 {
+	const char	*block_unit = "fsbno?";
 	int	i;
+
+	if (iocur_is_ddev(ioc))
+		block_unit = "fsbno";
+	else if (iocur_is_extlogdev(ioc))
+		block_unit = "logbno";
 
 	dbprintf("%s\n", tag);
 	dbprintf(_("\tbyte offset %lld, length %d\n"), ioc->off, ioc->len);
-	dbprintf(_("\tbuffer block %lld (fsbno %lld), %d bb%s\n"), ioc->bb,
-		(xfs_fsblock_t)XFS_DADDR_TO_FSB(mp, ioc->bb), ioc->blen,
-		ioc->blen == 1 ? "" : "s");
+	dbprintf(_("\tbuffer block %lld (%s %lld), %d bb%s\n"), ioc->bb,
+			block_unit,
+			(xfs_fsblock_t)XFS_DADDR_TO_FSB(mp, ioc->bb),
+			ioc->blen, ioc->blen == 1 ? "" : "s");
 	if (ioc->bbmap) {
 		dbprintf(_("\tblock map"));
 		for (i = 0; i < ioc->bbmap->nmaps; i++)
@@ -508,18 +537,19 @@ write_cur(void)
 
 }
 
-void
-set_cur(
-	const typ_t	*type,
-	xfs_daddr_t	blknum,
-	int		len,
-	int		ring_flag,
-	bbmap_t		*bbmap)
+static void
+__set_cur(
+	struct xfs_buftarg	*btargp,
+	const typ_t		*type,
+	xfs_daddr_t		 blknum,
+	int			 len,
+	int			 ring_flag,
+	bbmap_t			*bbmap)
 {
-	struct xfs_buf	*bp;
-	xfs_ino_t	dirino;
-	xfs_ino_t	ino;
-	uint16_t	mode;
+	struct xfs_buf		*bp;
+	xfs_ino_t		dirino;
+	xfs_ino_t		ino;
+	uint16_t		mode;
 	const struct xfs_buf_ops *ops = type ? type->bops : NULL;
 	int		error;
 
@@ -548,11 +578,11 @@ set_cur(
 		if (!iocur_top->bbmap)
 			return;
 		memcpy(iocur_top->bbmap, bbmap, sizeof(struct bbmap));
-		error = -libxfs_buf_read_map(mp->m_ddev_targp, bbmap->b,
+		error = -libxfs_buf_read_map(btargp, bbmap->b,
 				bbmap->nmaps, LIBXFS_READBUF_SALVAGE, &bp,
 				ops);
 	} else {
-		error = -libxfs_buf_read(mp->m_ddev_targp, blknum, len,
+		error = -libxfs_buf_read(btargp, blknum, len,
 				LIBXFS_READBUF_SALVAGE, &bp, ops);
 		iocur_top->bbmap = NULL;
 	}
@@ -588,6 +618,35 @@ set_cur(
 	if (ring_flag)
 		ring_add();
 }
+
+void
+set_cur(
+	const typ_t	*type,
+	xfs_daddr_t	blknum,
+	int		len,
+	int		ring_flag,
+	bbmap_t		*bbmap)
+{
+	__set_cur(mp->m_ddev_targp, type, blknum, len, ring_flag, bbmap);
+}
+
+void
+set_log_cur(
+	const typ_t	*type,
+	xfs_daddr_t	blknum,
+	int		len,
+	int		ring_flag,
+	bbmap_t		*bbmap)
+{
+	if (mp->m_logdev_targp->bt_bdev == mp->m_ddev_targp->bt_bdev) {
+		fprintf(stderr, "no external log specified\n");
+		exitcode = 1;
+		return;
+	}
+
+	__set_cur(mp->m_logdev_targp, type, blknum, len, ring_flag, bbmap);
+}
+
 
 void
 set_iocur_type(

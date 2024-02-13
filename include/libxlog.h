@@ -68,12 +68,9 @@ extern int	print_exit;
 extern int	print_skip_uuid;
 extern int	print_record_header;
 
-/* libxfs parameters */
-extern libxfs_init_t	x;
+void xlog_init(struct xfs_mount *mp, struct xlog *log);
+int xlog_is_dirty(struct xfs_mount *mp, struct xlog *log);
 
-
-extern int xlog_is_dirty(struct xfs_mount *, struct xlog *, libxfs_init_t *,
-			 int);
 extern struct xfs_buf *xlog_get_bp(struct xlog *, int);
 extern int	xlog_bread(struct xlog *log, xfs_daddr_t blk_no, int nbblks,
 				struct xfs_buf *bp, char **offset);

@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Copyright (C) 2018 Oracle.  All Rights Reserved.
- * Author: Darrick J. Wong <darrick.wong@oracle.com>
+ * Copyright (C) 2018-2024 Oracle.  All Rights Reserved.
+ * Author: Darrick J. Wong <djwong@kernel.org>
  */
 #include "xfs.h"
 #include <pthread.h>
@@ -156,6 +156,9 @@ bool				stdout_isatty;
  * error codes we return to the calling process.
  */
 bool				is_service;
+
+/* Set to true if the kernel supports XFS_SCRUB_IFLAG_FORCE_REBUILD */
+bool				use_force_rebuild;
 
 #define SCRUB_RET_SUCCESS	(0)	/* no problems left behind */
 #define SCRUB_RET_CORRUPT	(1)	/* corruption remains on fs */
@@ -532,6 +535,7 @@ _("%s: repairs made: %llu.\n"),
 		fprintf(stdout,
 _("%s: optimizations made: %llu.\n"),
 				ctx->mntpoint, ctx->preens);
+	fflush(stdout);
 }
 
 static void
@@ -617,6 +621,7 @@ main(
 	int			error;
 
 	fprintf(stdout, "EXPERIMENTAL xfs_scrub program in use! Use at your own risk!\n");
+	fflush(stdout);
 
 	progname = basename(argv[0]);
 	setlocale(LC_ALL, "");

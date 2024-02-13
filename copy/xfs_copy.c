@@ -582,7 +582,7 @@ main(int argc, char **argv)
 	xfs_alloc_rec_t	*rec_ptr;
 	extern char	*optarg;
 	extern int	optind;
-	libxfs_init_t	xargs;
+	struct libxfs_init xargs;
 	thread_args	*tcarg;
 	struct stat	statbuf;
 	int		error;
@@ -715,14 +715,9 @@ main(int argc, char **argv)
 	/* prepare the libxfs_init structure */
 
 	memset(&xargs, 0, sizeof(xargs));
-	xargs.isdirect = LIBXFS_DIRECT;
-	xargs.isreadonly = LIBXFS_ISREADONLY;
-
-	if (source_is_file)  {
-		xargs.dname = source_name;
-		xargs.disfile = 1;
-	} else
-		xargs.volname = source_name;
+	xargs.flags = LIBXFS_ISREADONLY | LIBXFS_DIRECT;
+	xargs.data.name = source_name;
+	xargs.data.isfile = source_is_file;
 
 	if (!libxfs_init(&xargs))  {
 		do_log(_("%s: couldn't initialize XFS library\n"
@@ -733,7 +728,7 @@ main(int argc, char **argv)
 	memset(&mbuf, 0, sizeof(xfs_mount_t));
 
 	/* We don't yet know the sector size, so read maximal size */
-	libxfs_buftarg_init(&mbuf, xargs.ddev, xargs.logdev, xargs.rtdev);
+	libxfs_buftarg_init(&mbuf, &xargs);
 	error = -libxfs_buf_read_uncached(mbuf.m_ddev_targp, XFS_SB_DADDR,
 			1 << (XFS_MAX_SECTORSIZE_LOG - BBSHIFT), 0, &sbp, NULL);
 	if (error) {
@@ -758,7 +753,7 @@ main(int argc, char **argv)
 	}
 	libxfs_buf_relse(sbp);
 
-	mp = libxfs_mount(&mbuf, sb, xargs.ddev, xargs.logdev, xargs.rtdev, 0);
+	mp = libxfs_mount(&mbuf, sb, &xargs, 0);
 	if (mp == NULL) {
 		do_log(_("%s: %s filesystem failed to initialize\n"
 			"%s: Aborting.\n"), progname, source_name, progname);
@@ -787,7 +782,7 @@ main(int argc, char **argv)
 	 */
 	memset(&xlog, 0, sizeof(struct xlog));
 	mp->m_log = &xlog;
-	c = xlog_is_dirty(mp, mp->m_log, &xargs, 0);
+	c = xlog_is_dirty(mp, mp->m_log);
 	if (!duplicate) {
 		if (c == 1) {
 			do_log(_(
@@ -832,13 +827,9 @@ main(int argc, char **argv)
 			do_out(_("Creating file %s\n"), target[i].name);
 
 			open_flags |= O_CREAT;
-			if (!buffered_output)
-				open_flags |= O_DIRECT;
 			write_last_block = 1;
 		} else if (S_ISREG(statbuf.st_mode))  {
 			open_flags |= O_TRUNC;
-			if (!buffered_output)
-				open_flags |= O_DIRECT;
 			write_last_block = 1;
 		} else  {
 			/*
@@ -855,6 +846,8 @@ main(int argc, char **argv)
 				exit(1);
 			}
 		}
+		if (!buffered_output)
+			open_flags |= O_DIRECT;
 
 		target[i].fd = open(target[i].name, open_flags, 0644);
 		if (target[i].fd < 0)  {
@@ -887,20 +880,32 @@ main(int argc, char **argv)
 				}
 			}
 		} else  {
-			char	*lb[XFS_MAX_SECTORSIZE] = { NULL };
+			char	*lb = memalign(wbuf_align, XFS_MAX_SECTORSIZE);
 			off64_t	off;
+			ssize_t	len;
 
 			/* ensure device files are sufficiently large */
+			memset(lb, 0, XFS_MAX_SECTORSIZE);
 
 			off = mp->m_sb.sb_dblocks * source_blocksize;
-			off -= sizeof(lb);
-			if (pwrite(target[i].fd, lb, sizeof(lb), off) < 0)  {
+			off -= XFS_MAX_SECTORSIZE;
+			len = pwrite(target[i].fd, lb, XFS_MAX_SECTORSIZE, off);
+			if (len < 0) {
 				do_log(_("%s:  failed to write last block\n"),
 					progname);
 				do_log(_("\tIs target \"%s\" too small?\n"),
 					target[i].name);
 				die_perror();
 			}
+			if (len != XFS_MAX_SECTORSIZE) {
+				do_log(
+ _("%s:  short write to last block: %zd bytes, %zu expected\n"),
+					progname, len, XFS_MAX_SECTORSIZE);
+				do_log(_("\tIs target \"%s\" too small?\n"),
+					target[i].name);
+				exit(1);
+			}
+			free(lb);
 		}
 	}
 

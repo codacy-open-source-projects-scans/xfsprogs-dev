@@ -10,34 +10,22 @@
 int print_exit;
 int print_skip_uuid;
 int print_record_header;
-libxfs_init_t x;
 
-/*
- * Return 1 for dirty, 0 for clean, -1 for errors
- */
-int
-xlog_is_dirty(
+void
+xlog_init(
 	struct xfs_mount	*mp,
-	struct xlog		*log,
-	libxfs_init_t		*x,
-	int			verbose)
+	struct xlog		*log)
 {
-	int			error;
-	xfs_daddr_t		head_blk, tail_blk;
+	unsigned int		log_sect_size = BBSIZE;
 
 	memset(log, 0, sizeof(*log));
 
-	/* We (re-)init members of libxfs_init_t here?  really? */
-	x->logBBsize = XFS_FSB_TO_BB(mp, mp->m_sb.sb_logblocks);
-	x->logBBstart = XFS_FSB_TO_DADDR(mp, mp->m_sb.sb_logstart);
-	x->lbsize = BBSIZE;
-	if (xfs_has_sector(mp))
-		x->lbsize <<= (mp->m_sb.sb_logsectlog - BBSHIFT);
-
 	log->l_dev = mp->m_logdev_targp;
-	log->l_logBBsize = x->logBBsize;
-	log->l_logBBstart = x->logBBstart;
-	log->l_sectBBsize = BTOBB(x->lbsize);
+	log->l_logBBsize = XFS_FSB_TO_BB(mp, mp->m_sb.sb_logblocks);
+	log->l_logBBstart = XFS_FSB_TO_DADDR(mp, mp->m_sb.sb_logstart);
+	if (xfs_has_sector(mp))
+		log_sect_size <<= (mp->m_sb.sb_logsectlog - BBSHIFT);
+	log->l_sectBBsize  = BTOBB(log_sect_size);
 	log->l_mp = mp;
 	if (xfs_has_sector(mp)) {
 		log->l_sectbb_log = mp->m_sb.sb_logsectlog - BBSHIFT;
@@ -49,6 +37,20 @@ xlog_is_dirty(
 		ASSERT(mp->m_sb.sb_logsectlog >= BBSHIFT);
 	}
 	log->l_sectbb_mask = (1 << log->l_sectbb_log) - 1;
+}
+
+/*
+ * Return 1 for dirty, 0 for clean, -1 for errors
+ */
+int
+xlog_is_dirty(
+	struct xfs_mount	*mp,
+	struct xlog		*log)
+{
+	int			error;
+	xfs_daddr_t		head_blk, tail_blk;
+
+	xlog_init(mp, log);
 
 	error = xlog_find_tail(log, &head_blk, &tail_blk);
 	if (error) {
@@ -57,11 +59,6 @@ xlog_is_dirty(
 			__func__, error);
 		return -1;
 	}
-
-	if (verbose)
-		xlog_warn(
-	_("%s: head block %" PRId64 " tail block %" PRId64 "\n"),
-			__func__, head_blk, tail_blk);
 
 	if (head_blk != tail_blk)
 		return 1;

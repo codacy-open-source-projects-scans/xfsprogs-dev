@@ -18,6 +18,8 @@
 #include "libfrog/dahashselftest.h"
 #include <sys/resource.h>
 
+struct libxfs_init	x;
+
 static void
 ts_create(void)
 {
@@ -50,48 +52,42 @@ increase_rlimit(void)
 }
 
 void
-xfs_init(libxfs_init_t *args)
+xfs_init(struct libxfs_init *args)
 {
-	memset(args, 0, sizeof(libxfs_init_t));
+	memset(args, 0, sizeof(*args));
 
-	if (isa_file)  {
-		args->disfile = 1;
-		args->dname = fs_name;
-		args->volname = NULL;
-	} else  {
-		args->disfile = 0;
-		args->volname = fs_name;
-		args->dname = NULL;
-	}
+	args->data.name = fs_name;
+	args->data.isfile = isa_file;
 
 	if (log_spec)  {	/* External log specified */
-		args->logname = log_name;
-		args->lisfile = (isa_file?1:0);
+		args->log.name = log_name;
+		args->log.isfile = isa_file;
 		/* XXX assume data file also means log file */
 		/* REVISIT: Need to do fs sanity / log validity checking */
 	}
 
 	if (rt_spec)  {	/* RT device specified */
-		args->rtname = rt_name;
-		args->risfile = (isa_file?1:0);
+		args->rt.name = rt_name;
+		args->rt.isfile = isa_file;
 		/* XXX assume data file also means rt file */
 	}
 
-	args->usebuflock = do_prefetch;
 	args->setblksize = 0;
-	args->isdirect = LIBXFS_DIRECT;
 	if (no_modify)
-		args->isreadonly = (LIBXFS_ISREADONLY | LIBXFS_ISINACTIVE);
+		args->flags = LIBXFS_ISREADONLY | LIBXFS_ISINACTIVE;
 	else if (dangerously)
-		args->isreadonly = (LIBXFS_ISINACTIVE | LIBXFS_DANGEROUSLY);
+		args->flags = LIBXFS_ISINACTIVE | LIBXFS_DANGEROUSLY;
 	else
-		args->isreadonly = LIBXFS_EXCLUSIVELY;
+		args->flags = LIBXFS_EXCLUSIVELY;
+	args->flags |= LIBXFS_DIRECT;
+	if (do_prefetch)
+		args->flags |= LIBXFS_USEBUFLOCK;
 
 	if (!libxfs_init(args)) {
 		/* would -d be an option? */
 		if (!no_modify && !dangerously) {
-			args->isreadonly = (LIBXFS_ISINACTIVE |
-					    LIBXFS_DANGEROUSLY);
+			args->flags &= ~LIBXFS_EXCLUSIVELY;
+			args->flags |= LIBXFS_ISINACTIVE | LIBXFS_DANGEROUSLY;
 			if (libxfs_init(args))
 				fprintf(stderr,
 _("Unmount or use the dangerous (-d) option to repair a read-only mounted filesystem\n"));
