@@ -37,9 +37,7 @@ pread_help(void)
 " -R   -- read at random offsets in the range of bytes\n"
 " -Z N -- zeed the random number generator (used when reading randomly)\n"
 "         (heh, zorry, the -s/-S arguments were already in use in pwrite)\n"
-#ifdef HAVE_PREADV
 " -V N -- use vectored IO with N iovecs of blocksize each (preadv)\n"
-#endif
 "\n"
 " When in \"random\" mode, the number of read operations will equal the\n"
 " number required to do a complete forward/backward scan of the range.\n"
@@ -116,7 +114,7 @@ alloc_buffer(
 static void
 __dump_buffer(
 	void		*buf,
-	off64_t		offset,
+	off_t		offset,
 	ssize_t		len)
 {
 	int		i, j;
@@ -141,7 +139,7 @@ __dump_buffer(
 
 void
 dump_buffer(
-	off64_t		offset,
+	off_t		offset,
 	ssize_t		len)
 {
 	int		i, l;
@@ -160,11 +158,10 @@ dump_buffer(
 	}
 }
 
-#ifdef HAVE_PREADV
 static ssize_t
 do_preadv(
 	int		fd,
-	off64_t		offset,
+	off_t		offset,
 	long long	count)
 {
 	int		vecs = 0;
@@ -192,14 +189,11 @@ do_preadv(
 
 	return bytes;
 }
-#else
-#define do_preadv(fd, offset, count) (0)
-#endif
 
 static ssize_t
 do_pread(
 	int		fd,
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	size_t		buffer_size)
 {
@@ -212,13 +206,13 @@ do_pread(
 static int
 read_random(
 	int		fd,
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	long long	*total,
 	unsigned int	seed,
 	int		eof)
 {
-	off64_t		end, off, range;
+	off_t		end, off, range;
 	ssize_t		bytes;
 	int		ops = 0;
 
@@ -259,12 +253,12 @@ read_random(
 static int
 read_backward(
 	int		fd,
-	off64_t		*offset,
+	off_t		*offset,
 	long long	*count,
 	long long	*total,
 	int		eof)
 {
-	off64_t		end, off = *offset;
+	off_t		end, off = *offset;
 	ssize_t		bytes = 0, bytes_requested;
 	long long	cnt = *count;
 	int		ops = 0;
@@ -319,7 +313,7 @@ read_backward(
 static int
 read_forward(
 	int		fd,
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	long long	*total,
 	int		verbose,
@@ -353,7 +347,7 @@ read_forward(
 int
 read_buffer(
 	int		fd,
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	long long	*total,
 	int		verbose,
@@ -368,7 +362,7 @@ pread_f(
 	char		**argv)
 {
 	size_t		bsize;
-	off64_t		offset;
+	off_t		offset;
 	unsigned int	zeed = 0;
 	long long	count, total, tmp;
 	size_t		fsblocksize, fssectsize;
@@ -414,7 +408,6 @@ pread_f(
 		case 'v':
 			vflag = 1;
 			break;
-#ifdef HAVE_PREADV
 		case 'V':
 			vectors = strtoul(optarg, &sp, 0);
 			if (!sp || sp == optarg) {
@@ -424,7 +417,6 @@ pread_f(
 				return 0;
 			}
 			break;
-#endif
 		case 'Z':
 			zeed = strtoul(optarg, &sp, 0);
 			if (!sp || sp == optarg) {

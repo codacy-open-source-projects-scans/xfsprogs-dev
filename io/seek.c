@@ -35,11 +35,6 @@ seek_help(void)
 "\n"));
 }
 
-#ifndef HAVE_SEEK_DATA
-#define	SEEK_DATA	3	/* seek to the next data */
-#define	SEEK_HOLE	4	/* seek to the next hole */
-#endif
-
 /* values for flag variable */
 #define	SEEK_DFLAG	(1 << 0)
 #define	SEEK_HFLAG	(1 << 1)
@@ -63,8 +58,8 @@ static void
 seek_output(
 	int	startflag,
 	char	*type,
-	off64_t	start,
-	off64_t	offset)
+	off_t	start,
+	off_t	offset)
 {
 	if (offset == -1) {
 		if (errno == ENXIO) {
@@ -92,7 +87,7 @@ seek_f(
 	int	argc,
 	char	**argv)
 {
-	off64_t		offset, start;
+	off_t		offset, start;
 	size_t		fsblocksize, fssectsize;
 	int		c;
 	int		current;	/* specify data or hole */

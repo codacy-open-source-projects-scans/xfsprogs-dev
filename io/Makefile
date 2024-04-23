@@ -13,85 +13,24 @@ CFILES = init.c \
 	file.c freeze.c fsuuid.c fsync.c getrusage.c imap.c inject.c label.c \
 	link.c mmap.c open.c parent.c pread.c prealloc.c pwrite.c reflink.c \
 	resblks.c scrub.c seek.c shutdown.c stat.c swapext.c sync.c \
-	truncate.c utimes.c
+	truncate.c utimes.c fadvise.c sendfile.c madvise.c mincore.c fiemap.c \
+	sync_file_range.c readdir.c
 
 LLDLIBS = $(LIBXCMD) $(LIBHANDLE) $(LIBFROG) $(LIBPTHREAD) $(LIBUUID)
 LTDEPENDENCIES = $(LIBXCMD) $(LIBHANDLE) $(LIBFROG)
 LLDFLAGS = -static-libtool-libs
-
-ifeq ($(HAVE_FADVISE),yes)
-CFILES += fadvise.c
-LCFLAGS += -DHAVE_FADVISE
-else
-LSRCFILES += fadvise.c
-endif
-
-ifeq ($(HAVE_MADVISE),yes)
-CFILES += madvise.c
-LCFLAGS += -DHAVE_MADVISE
-else
-LSRCFILES += madvise.c
-endif
-
-ifeq ($(HAVE_MINCORE),yes)
-CFILES += mincore.c
-LCFLAGS += -DHAVE_MINCORE
-else
-LSRCFILES += mincore.c
-endif
-
-ifeq ($(HAVE_SENDFILE),yes)
-CFILES += sendfile.c
-LCFLAGS += -DHAVE_SENDFILE
-else
-LSRCFILES += sendfile.c
-endif
-
-ifeq ($(HAVE_FIEMAP),yes)
-CFILES += fiemap.c
-LCFLAGS += -DHAVE_FIEMAP
-else
-LSRCFILES += fiemap.c
-endif
 
 ifeq ($(HAVE_COPY_FILE_RANGE),yes)
 CFILES += copy_file_range.c
 LCFLAGS += -DHAVE_COPY_FILE_RANGE
 endif
 
-ifeq ($(HAVE_SYNC_FILE_RANGE),yes)
-CFILES += sync_file_range.c
-LCFLAGS += -DHAVE_SYNC_FILE_RANGE
-endif
-
-ifeq ($(HAVE_SYNCFS),yes)
-LCFLAGS += -DHAVE_SYNCFS
-endif
-
 ifeq ($(ENABLE_EDITLINE),yes)
 LLDLIBS += $(LIBEDITLINE) $(LIBTERMCAP)
 endif
 
-ifeq ($(HAVE_FALLOCATE),yes)
-LCFLAGS += -DHAVE_FALLOCATE
-endif
-
-# Also implies PWRITEV
-ifeq ($(HAVE_PREADV),yes)
-LCFLAGS += -DHAVE_PREADV -DHAVE_PWRITEV
-endif
-
 ifeq ($(HAVE_PWRITEV2),yes)
 LCFLAGS += -DHAVE_PWRITEV2
-endif
-
-ifeq ($(HAVE_READDIR),yes)
-CFILES += readdir.c
-LCFLAGS += -DHAVE_READDIR
-endif
-
-ifeq ($(HAVE_MREMAP),yes)
-LCFLAGS += -DHAVE_MREMAP
 endif
 
 ifeq ($(HAVE_MAP_SYNC),yes)
@@ -106,10 +45,6 @@ endif
 
 ifeq ($(HAVE_GETFSMAP),yes)
 CFILES += fsmap.c
-endif
-
-ifeq ($(HAVE_STATFS_FLAGS),yes)
-LCFLAGS += -DHAVE_STATFS_FLAGS
 endif
 
 default: depend $(LTCOMMAND)

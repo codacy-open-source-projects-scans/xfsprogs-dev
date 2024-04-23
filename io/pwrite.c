@@ -40,9 +40,7 @@ pwrite_help(void)
 " -R   -- write at random offsets in the specified range of bytes\n"
 " -Z N -- zeed the random number generator (used when writing randomly)\n"
 "         (heh, zorry, the -s/-S arguments were already in use in pwrite)\n"
-#ifdef HAVE_PWRITEV
 " -V N -- use vectored IO with N iovecs of blocksize each (pwritev)\n"
-#endif
 #ifdef HAVE_PWRITEV2
 " -N   -- Perform the pwritev2() with RWF_NOWAIT\n"
 " -D   -- Perform the pwritev2() with RWF_DSYNC\n"
@@ -50,11 +48,10 @@ pwrite_help(void)
 "\n"));
 }
 
-#ifdef HAVE_PWRITEV
 static ssize_t
 do_pwritev(
 	int		fd,
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	int		pwritev2_flags)
 {
@@ -90,14 +87,11 @@ do_pwritev(
 
 	return bytes;
 }
-#else
-#define do_pwritev(fd, offset, count, pwritev2_flags) (0)
-#endif
 
 static ssize_t
 do_pwrite(
 	int		fd,
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	size_t		buffer_size,
 	int		pwritev2_flags)
@@ -110,13 +104,13 @@ do_pwrite(
 
 static int
 write_random(
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	unsigned int	seed,
 	long long	*total,
 	int 		pwritev2_flags)
 {
-	off64_t		off, range;
+	off_t		off, range;
 	ssize_t		bytes;
 	int		ops = 0;
 
@@ -155,12 +149,12 @@ write_random(
 
 static int
 write_backward(
-	off64_t		offset,
+	off_t		offset,
 	long long	*count,
 	long long	*total,
 	int		pwritev2_flags)
 {
-	off64_t		end, off = offset;
+	off_t		end, off = offset;
 	ssize_t		bytes = 0, bytes_requested;
 	long long	cnt = *count;
 	int		ops = 0;
@@ -214,11 +208,11 @@ write_backward(
 
 static int
 write_buffer(
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	size_t		bs,
 	int		fd,
-	off64_t		skip,
+	off_t		skip,
 	long long	*total,
 	int		pwritev2_flags)
 {
@@ -253,7 +247,7 @@ write_buffer(
 
 static int
 write_once(
-	off64_t		offset,
+	off_t		offset,
 	long long	count,
 	long long	*total,
 	int		pwritev2_flags)
@@ -275,7 +269,7 @@ pwrite_f(
 	char		**argv)
 {
 	size_t		bsize;
-	off64_t		offset, skip = 0;
+	off_t		offset, skip = 0;
 	long long	count, total, tmp;
 	unsigned int	zeed = 0, seed = 0xcdcdcdcd;
 	size_t		fsblocksize, fssectsize;
@@ -353,7 +347,6 @@ pwrite_f(
 		case 'u':
 			uflag = 1;
 			break;
-#ifdef HAVE_PWRITEV
 		case 'V':
 			vectors = strtoul(optarg, &sp, 0);
 			if (!sp || sp == optarg) {
@@ -363,7 +356,6 @@ pwrite_f(
 				return 0;
 			}
 			break;
-#endif
 		case 'w':
 			wflag = 1;
 			break;
