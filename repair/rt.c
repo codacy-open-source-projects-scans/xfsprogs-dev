@@ -13,31 +13,52 @@
 #include "protos.h"
 #include "err_protos.h"
 #include "rt.h"
-#include "xfs_rtbitmap.h"
-
-#define xfs_highbit64 libxfs_highbit64	/* for XFS_RTBLOCKLOG macro */
 
 void
 rtinit(xfs_mount_t *mp)
 {
+	unsigned long long	wordcnt;
+
 	if (mp->m_sb.sb_rblocks == 0)
 		return;
 
 	/*
-	 * realtime init -- blockmap initialization is
-	 * handled by incore_init()
+	 * Allocate buffers for formatting the collected rt free space
+	 * information.  The rtbitmap buffer must be large enough to compare
+	 * against any unused bytes in the last block of the file.
 	 */
-	/*
-	sumfile = calloc(mp->m_rsumsize, 1);
-	*/
-	if ((btmcompute = calloc(mp->m_sb.sb_rbmblocks *
-			mp->m_sb.sb_blocksize, 1)) == NULL)
+	wordcnt = libxfs_rtbitmap_wordcount(mp, mp->m_sb.sb_rextents);
+	btmcompute = calloc(wordcnt, sizeof(union xfs_rtword_raw));
+	if (!btmcompute)
 		do_error(
 	_("couldn't allocate memory for incore realtime bitmap.\n"));
 
-	if ((sumcompute = calloc(mp->m_rsumsize, 1)) == NULL)
+	wordcnt = libxfs_rtsummary_wordcount(mp, mp->m_rsumlevels,
+			mp->m_sb.sb_rbmblocks);
+	sumcompute = calloc(wordcnt, sizeof(union xfs_suminfo_raw));
+	if (!sumcompute)
 		do_error(
 	_("couldn't allocate memory for incore realtime summary info.\n"));
+}
+
+static inline void
+set_rtword(
+	struct xfs_mount	*mp,
+	union xfs_rtword_raw	*word,
+	xfs_rtword_t		value)
+{
+	word->old = value;
+}
+
+static inline void
+inc_sumcount(
+	struct xfs_mount	*mp,
+	union xfs_suminfo_raw	*info,
+	xfs_rtsumoff_t		index)
+{
+	union xfs_suminfo_raw	*p = info + index;
+
+	p->old++;
 }
 
 /*
@@ -45,12 +66,13 @@ rtinit(xfs_mount_t *mp)
  * incore realtime extent map.
  */
 int
-generate_rtinfo(xfs_mount_t	*mp,
-		xfs_rtword_t	*words,
-		xfs_suminfo_t	*sumcompute)
+generate_rtinfo(
+	struct xfs_mount	*mp,
+	union xfs_rtword_raw	*words,
+	union xfs_suminfo_raw	*sumcompute)
 {
-	xfs_rtblock_t	extno;
-	xfs_rtblock_t	start_ext;
+	xfs_rtxnum_t	extno;
+	xfs_rtxnum_t	start_ext;
 	int		bitsperblock;
 	int		bmbno;
 	xfs_rtword_t	freebit;
@@ -64,7 +86,7 @@ generate_rtinfo(xfs_mount_t	*mp,
 
 	ASSERT(mp->m_rbmip == NULL);
 
-	bitsperblock = mp->m_sb.sb_blocksize * NBBY;
+	bitsperblock = mp->m_blockwsize << XFS_NBWORDLOG;
 	extno = start_ext = 0;
 	bmbno = in_extent = start_bmbno = 0;
 
@@ -76,7 +98,7 @@ generate_rtinfo(xfs_mount_t	*mp,
 	 */
 	while (extno < mp->m_sb.sb_rextents)  {
 		freebit = 1;
-		*words = 0;
+		set_rtword(mp, words, 0);
 		bits = 0;
 		for (i = 0; i < sizeof(xfs_rtword_t) * NBBY &&
 				extno < mp->m_sb.sb_rextents; i++, extno++)  {
@@ -91,15 +113,15 @@ generate_rtinfo(xfs_mount_t	*mp,
 				}
 			} else if (in_extent == 1) {
 				len = (int) (extno - start_ext);
-				log = XFS_RTBLOCKLOG(len);
+				log = libxfs_highbit64(len);
 				offs = xfs_rtsumoffs(mp, log, start_bmbno);
-				sumcompute[offs]++;
+				inc_sumcount(mp, sumcompute, offs);
 				in_extent = 0;
 			}
 
 			freebit <<= 1;
 		}
-		*words = bits;
+		set_rtword(mp, words, bits);
 		words++;
 
 		if (extno % bitsperblock == 0)
@@ -107,9 +129,9 @@ generate_rtinfo(xfs_mount_t	*mp,
 	}
 	if (in_extent == 1) {
 		len = (int) (extno - start_ext);
-		log = XFS_RTBLOCKLOG(len);
+		log = libxfs_highbit64(len);
 		offs = xfs_rtsumoffs(mp, log, start_bmbno);
-		sumcompute[offs]++;
+		inc_sumcount(mp, sumcompute, offs);
 	}
 
 	if (mp->m_sb.sb_frextents != sb_frextents) {
@@ -176,7 +198,7 @@ check_rtfile_contents(
 			break;
 		}
 
-		if (memcmp(bp->b_addr, buf, mp->m_sb.sb_blocksize))
+		if (memcmp(bp->b_addr, buf, mp->m_blockwsize << XFS_WORDLOG))
 			do_warn(_("discrepancy in %s at dblock 0x%llx\n"),
 					filename, (unsigned long long)bno);
 

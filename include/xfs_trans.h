@@ -98,6 +98,8 @@ int	libxfs_trans_alloc_rollable(struct xfs_mount *mp, uint blocks,
 int	libxfs_trans_alloc_empty(struct xfs_mount *mp, struct xfs_trans **tpp);
 int	libxfs_trans_commit(struct xfs_trans *);
 void	libxfs_trans_cancel(struct xfs_trans *);
+int	libxfs_trans_reserve_more(struct xfs_trans *tp, uint blocks,
+			uint rtextents);
 
 /* cancel dfops associated with a transaction */
 void xfs_defer_cancel(struct xfs_trans *);
@@ -158,7 +160,6 @@ libxfs_trans_read_buf(
 }
 
 #define xfs_log_item_in_current_chkpt(lip)	(false)
-#define xfs_trans_item_relog(lip, tp)		(NULL)
 
 /* Contorted mess to make gcc shut up about unused vars. */
 #define xlog_grant_push_threshold(log, need)    \

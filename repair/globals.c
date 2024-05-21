@@ -86,8 +86,8 @@ int64_t		fs_max_file_offset;
 
 /* realtime info */
 
-xfs_rtword_t	*btmcompute;
-xfs_suminfo_t	*sumcompute;
+union xfs_rtword_raw	*btmcompute;
+union xfs_suminfo_raw	*sumcompute;
 
 /* inode tree records have full or partial backptr fields ? */
 
@@ -116,7 +116,7 @@ uint32_t	sb_width;
 struct aglock	*ag_locks;
 struct aglock	rt_lock;
 
-int		report_interval;
+time_t		report_interval;
 uint64_t	*prog_rpt_done;
 
 int		ag_stride;

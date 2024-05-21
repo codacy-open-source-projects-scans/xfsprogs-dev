@@ -23,6 +23,11 @@
 #include "xfs_refcount_btree.h"
 #include "libfrog/platform.h"
 
+#include "xfs_format.h"
+#include "xfs_da_format.h"
+#include "xfs_log_format.h"
+#include "xfs_ondisk.h"
+
 #include "libxfs.h"		/* for now */
 
 #ifndef HAVE_LIBURCU_ATOMIC64
@@ -166,8 +171,8 @@ libxfs_device_close(
 	if (ret) {
 		ret = -errno;
 		fprintf(stderr,
-	_("%s: flush of device %lld failed, err=%d"),
-			progname, (long long)dev, ret);
+	_("%s: flush of device %s failed, err=%d"),
+			progname, dev->name, ret);
 	}
 	close(dev->fd);
 
@@ -248,6 +253,7 @@ libxfs_close_devices(
 int
 libxfs_init(struct libxfs_init *a)
 {
+	xfs_check_ondisk_structs();
 	rcu_init();
 	rcu_register_thread();
 	radix_tree_init();
@@ -284,6 +290,7 @@ rtmount_init(
 {
 	struct xfs_buf	*bp;	/* buffer for last block of subvolume */
 	xfs_daddr_t	d;	/* address of last block of subvolume */
+	unsigned int	rsumblocks;
 	int		error;
 
 	if (mp->m_sb.sb_rblocks == 0)
@@ -309,10 +316,9 @@ rtmount_init(
 		return -1;
 	}
 	mp->m_rsumlevels = mp->m_sb.sb_rextslog + 1;
-	mp->m_rsumsize =
-		(uint)sizeof(xfs_suminfo_t) * mp->m_rsumlevels *
-		mp->m_sb.sb_rbmblocks;
-	mp->m_rsumsize = roundup(mp->m_rsumsize, mp->m_sb.sb_blocksize);
+	rsumblocks = xfs_rtsummary_blockcount(mp, mp->m_rsumlevels,
+			mp->m_sb.sb_rbmblocks);
+	mp->m_rsumsize = XFS_FSB_TO_B(mp, rsumblocks);
 	mp->m_rbmip = mp->m_rsumip = NULL;
 
 	/*

@@ -228,6 +228,9 @@
 #define trace_xfs_defer_finish_done(a,b)	((void) 0)
 #define trace_xfs_defer_cancel_list(a,b)	((void) 0)
 #define trace_xfs_defer_create_intent(a,b)	((void) 0)
+#define trace_xfs_defer_isolate_paused(...)	((void) 0)
+#define trace_xfs_defer_item_pause(...)		((void) 0)
+#define trace_xfs_defer_item_unpause(...)	((void) 0)
 
 #define trace_xfs_bmap_free_defer(...)		((void) 0)
 #define trace_xfs_bmap_free_deferred(...)	((void) 0)
@@ -335,5 +338,7 @@
 #define trace_xfs_rmap_delete_error(...)	((void) 0)
 
 #define trace_xfs_fs_mark_healthy(a,b)		((void) 0)
+
+#define trace_xlog_intent_recovery_failed(...)	((void) 0)
 
 #endif /* __TRACE_H__ */

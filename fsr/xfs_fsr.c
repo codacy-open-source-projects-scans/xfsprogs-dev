@@ -72,7 +72,7 @@ static int  packfile(char *fname, char *tname, int fd,
 static void fsrdir(char *dirname);
 static int  fsrfs(char *mntdir, xfs_ino_t ino, int targetrange);
 static void initallfs(char *mtab);
-static void fsrallfs(char *mtab, int howlong, char *leftofffile);
+static void fsrallfs(char *mtab, time_t howlong, char *leftofffile);
 static void fsrall_cleanup(int timeout);
 static int  getnextents(int);
 int xfsrtextsize(int fd);
@@ -164,7 +164,19 @@ main(int argc, char **argv)
 			usage(1);
 			break;
 		case 't':
-			howlong = atoi(optarg);
+			errno = 0;
+			howlong = strtol(optarg, NULL, 10);
+			if (errno) {
+				fprintf(stderr, _("%s: invalid runtime: %s\n"),
+					optarg, strerror(errno));
+				exit(1);
+			}
+			if (howlong > INT_MAX) {
+				fprintf(stderr,
+				_("%s: the maximum runtime is %d seconds.\n"),
+					optarg, INT_MAX);
+				exit(1);
+			}
 			break;
 		case 'f':
 			leftofffile = optarg;
@@ -173,10 +185,24 @@ main(int argc, char **argv)
 			mtab = optarg;
 			break;
 		case 'b':
-			argv_blksz_dio = atoi(optarg);
+			errno = 0;
+			argv_blksz_dio = strtol(optarg, NULL, 10);
+			if (errno) {
+				fprintf(stderr,
+					_("%s: invalid block size: %s\n"),
+					optarg, strerror(errno));
+				exit(1);
+			}
 			break;
 		case 'p':
-			npasses = atoi(optarg);
+			errno = 0;
+			npasses = strtol(optarg, NULL, 10);
+			if (errno) {
+				fprintf(stderr,
+					_("%s: invalid number of passes: %s\n"),
+					optarg, strerror(errno));
+				exit(1);
+			}
 			break;
 		case 'C':
 			/* Testing opt: coerses frag count in result */
@@ -387,7 +413,7 @@ initallfs(char *mtab)
 }
 
 static void
-fsrallfs(char *mtab, int howlong, char *leftofffile)
+fsrallfs(char *mtab, time_t howlong, char *leftofffile)
 {
 	int fd;
 	int error;
