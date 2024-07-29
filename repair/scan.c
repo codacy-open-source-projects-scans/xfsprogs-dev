@@ -42,7 +42,7 @@ struct aghdr_cnts {
 void
 set_mp(xfs_mount_t *mpp)
 {
-	libxfs_bcache_purge();
+	libxfs_bcache_purge(mp);
 	mp = mpp;
 }
 
@@ -224,7 +224,6 @@ scan_bmapbt(
 	xfs_agnumber_t		agno;
 	xfs_agblock_t		agbno;
 	int			state;
-	int			error;
 
 	/*
 	 * unlike the ag freeblock btrees, if anything looks wrong
@@ -415,12 +414,8 @@ _("bad state %d, inode %" PRIu64 " bmap block 0x%" PRIx64 "\n"),
 	if (check_dups && collect_rmaps) {
 		agno = XFS_FSB_TO_AGNO(mp, bno);
 		pthread_mutex_lock(&ag_locks[agno].lock);
-		error = rmap_add_bmbt_rec(mp, ino, whichfork, bno);
+		rmap_add_bmbt_rec(mp, ino, whichfork, bno);
 		pthread_mutex_unlock(&ag_locks[agno].lock);
-		if (error)
-			do_error(
-_("couldn't add inode %"PRIu64" bmbt block %"PRIu64" reverse-mapping data."),
-				ino, bno);
 	}
 
 	if (level == 0) {
@@ -2364,17 +2359,17 @@ validate_agf(
 	unsigned int		levels;
 	struct xfs_perag	*pag = libxfs_perag_get(mp, agno);
 
-	levels = be32_to_cpu(agf->agf_levels[XFS_BTNUM_BNO]);
+	levels = be32_to_cpu(agf->agf_bno_level);
 	if (levels == 0 || levels > mp->m_alloc_maxlevels) {
 		do_warn(_("bad levels %u for btbno root, agno %d\n"),
 			levels, agno);
 	}
 
-	bno = be32_to_cpu(agf->agf_roots[XFS_BTNUM_BNO]);
+	bno = be32_to_cpu(agf->agf_bno_root);
 	if (libxfs_verify_agbno(pag, bno)) {
 		magic = xfs_has_crc(mp) ? XFS_ABTB_CRC_MAGIC
 							 : XFS_ABTB_MAGIC;
-		scan_sbtree(bno, be32_to_cpu(agf->agf_levels[XFS_BTNUM_BNO]),
+		scan_sbtree(bno, be32_to_cpu(agf->agf_bno_level),
 			    agno, 0, scan_allocbt, 1, magic, agcnts,
 			    &xfs_bnobt_buf_ops);
 	} else {
@@ -2382,17 +2377,17 @@ validate_agf(
 			bno, agno);
 	}
 
-	levels = be32_to_cpu(agf->agf_levels[XFS_BTNUM_CNT]);
+	levels = be32_to_cpu(agf->agf_cnt_level);
 	if (levels == 0 || levels > mp->m_alloc_maxlevels) {
 		do_warn(_("bad levels %u for btbcnt root, agno %d\n"),
 			levels, agno);
 	}
 
-	bno = be32_to_cpu(agf->agf_roots[XFS_BTNUM_CNT]);
+	bno = be32_to_cpu(agf->agf_cnt_root);
 	if (libxfs_verify_agbno(pag, bno)) {
 		magic = xfs_has_crc(mp) ? XFS_ABTC_CRC_MAGIC
 							 : XFS_ABTC_MAGIC;
-		scan_sbtree(bno, be32_to_cpu(agf->agf_levels[XFS_BTNUM_CNT]),
+		scan_sbtree(bno, be32_to_cpu(agf->agf_cnt_level),
 			    agno, 0, scan_allocbt, 1, magic, agcnts,
 			    &xfs_cntbt_buf_ops);
 	} else  {
@@ -2409,14 +2404,14 @@ validate_agf(
 		priv.last_rec.rm_owner = XFS_RMAP_OWN_UNKNOWN;
 		priv.nr_blocks = 0;
 
-		levels = be32_to_cpu(agf->agf_levels[XFS_BTNUM_RMAP]);
+		levels = be32_to_cpu(agf->agf_rmap_level);
 		if (levels == 0 || levels > mp->m_rmap_maxlevels) {
 			do_warn(_("bad levels %u for rmapbt root, agno %d\n"),
 				levels, agno);
 			rmap_avoid_check();
 		}
 
-		bno = be32_to_cpu(agf->agf_roots[XFS_BTNUM_RMAP]);
+		bno = be32_to_cpu(agf->agf_rmap_root);
 		if (libxfs_verify_agbno(pag, bno)) {
 			scan_sbtree(bno, levels, agno, 0, scan_rmapbt, 1,
 					XFS_RMAP_CRC_MAGIC, &priv,
