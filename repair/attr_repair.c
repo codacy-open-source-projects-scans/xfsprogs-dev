@@ -291,8 +291,23 @@ process_shortform_attr(
 			}
 		}
 
+		if (currententry->flags & ~XFS_ATTR_ONDISK_MASK) {
+			do_warn(
+	_("unknown flags 0x%x in shortform attribute %d in inode %" PRIu64 "\n"),
+				currententry->flags, i, ino);
+			junkit = 1;
+		}
+
+		if (!libxfs_attr_check_namespace(currententry->flags)) {
+			do_warn(
+	_("multiple namespaces for shortform attribute %d in inode %" PRIu64 "\n"),
+				i, ino);
+			junkit = 1;
+		}
+
 		/* namecheck checks for null chars in attr names. */
-		if (!libxfs_attr_namecheck(currententry->nameval,
+		if (!libxfs_attr_namecheck(currententry->flags,
+					   currententry->nameval,
 					   currententry->namelen)) {
 			do_warn(
 	_("entry contains illegal character in shortform attribute name\n"));
@@ -311,6 +326,13 @@ process_shortform_attr(
 					(char *)&currententry->nameval[0],
 					NULL, currententry->namelen,
 					currententry->valuelen);
+
+		if ((currententry->flags & XFS_ATTR_PARENT) &&
+		    !xfs_has_parent(mp)) {
+			do_warn(
+ _("parent pointer found on filesystem that doesn't support parent pointers\n"));
+			junkit |= 1;
+		}
 
 		remainingspace = remainingspace -
 					xfs_attr_sf_entsize(currententry);
@@ -470,10 +492,11 @@ process_leaf_attr_local(
 	xfs_ino_t		ino)
 {
 	xfs_attr_leaf_name_local_t *local;
+	xfs_dahash_t		computed;
 
 	local = xfs_attr3_leaf_name_local(leaf, i);
 	if (local->namelen == 0 ||
-	    !libxfs_attr_namecheck(local->nameval,
+	    !libxfs_attr_namecheck(entry->flags, local->nameval,
 				   local->namelen)) {
 		do_warn(
 	_("attribute entry %d in attr block %u, inode %" PRIu64 " has bad name (namelen = %d)\n"),
@@ -489,9 +512,12 @@ process_leaf_attr_local(
 	 * ordering anyway in case both the name value and the
 	 * hashvalue were wrong but matched. Unlikely, however.
 	 */
-	if (be32_to_cpu(entry->hashval) != libxfs_da_hashname(
-				&local->nameval[0], local->namelen) ||
-				be32_to_cpu(entry->hashval) < last_hashval) {
+	computed = libxfs_attr_hashval(mp, entry->flags, local->nameval,
+				       local->namelen,
+				       local->nameval + local->namelen,
+				       be16_to_cpu(local->valuelen));
+	if (be32_to_cpu(entry->hashval) != computed ||
+	    be32_to_cpu(entry->hashval) < last_hashval) {
 		do_warn(
 	_("bad hashvalue for attribute entry %d in attr block %u, inode %" PRIu64 "\n"),
 			i, da_bno, ino);
@@ -508,6 +534,15 @@ process_leaf_attr_local(
 			return -1;
 		}
 	}
+
+	if ((entry->flags & XFS_ATTR_PARENT) && !xfs_has_parent(mp)) {
+		do_warn(
+ _("parent pointer found in attribute entry %d in attr block %u, inode %"
+   PRIu64 " on filesystem that doesn't support parent pointers\n"),
+				i, da_bno, ino);
+		return -1;
+	}
+
 	return xfs_attr_leaf_entsize_local(local->namelen,
 						be16_to_cpu(local->valuelen));
 }
@@ -525,19 +560,35 @@ process_leaf_attr_remote(
 {
 	xfs_attr_leaf_name_remote_t *remotep;
 	char*			value;
+	xfs_dahash_t		computed;
 
 	remotep = xfs_attr3_leaf_name_remote(leaf, i);
 
+	computed = libxfs_attr_hashval(mp, entry->flags, remotep->name,
+				       remotep->namelen, NULL,
+				       be32_to_cpu(remotep->valuelen));
 	if (remotep->namelen == 0 ||
-	    !libxfs_attr_namecheck(remotep->name,
+	    !libxfs_attr_namecheck(entry->flags, remotep->name,
 				   remotep->namelen) ||
-	    be32_to_cpu(entry->hashval) !=
-			libxfs_da_hashname((unsigned char *)&remotep->name[0],
-					   remotep->namelen) ||
+	    be32_to_cpu(entry->hashval) != computed ||
 	    be32_to_cpu(entry->hashval) < last_hashval ||
 	    be32_to_cpu(remotep->valueblk) == 0) {
 		do_warn(
 	_("inconsistent remote attribute entry %d in attr block %u, ino %" PRIu64 "\n"), i, da_bno, ino);
+		return -1;
+	}
+
+	if (entry->flags & XFS_ATTR_PARENT) {
+		if (!xfs_has_parent(mp))
+			do_warn(
+ _("parent pointer found in attribute entry %d in attr block %u, inode %"
+   PRIu64 " on filesystem that doesn't support parent pointers\n"),
+					i, da_bno, ino);
+		else
+			do_warn(
+ _("parent pointer found in attribute entry %d in attr block %u, inode %"
+   PRIu64 " with bogus remote value\n"),
+					i, da_bno, ino);
 		return -1;
 	}
 
@@ -589,7 +640,7 @@ process_leaf_attr_block(
 	da_freemap_t *attr_freemap;
 	struct xfs_attr3_icleaf_hdr leafhdr;
 
-	xfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &leafhdr, leaf);
+	libxfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &leafhdr, leaf);
 	clearit = usedbs = 0;
 	firstb = mp->m_sb.sb_blocksize;
 	stop = xfs_attr3_leaf_hdr_size(leaf);
@@ -636,6 +687,22 @@ process_leaf_attr_block(
 			do_warn(
 	_("bad attribute nameidx %d in attr block %u, inode %" PRIu64 "\n"),
 				be16_to_cpu(entry->nameidx), da_bno, ino);
+			clearit = 1;
+			break;
+		}
+
+		if (entry->flags & ~XFS_ATTR_ONDISK_MASK) {
+			do_warn(
+	_("unknown flags 0x%x in attribute entry #%d in attr block %u, inode %" PRIu64 "\n"),
+				entry->flags, i, da_bno, ino);
+			clearit = 1;
+			break;
+		}
+
+		if (!libxfs_attr_check_namespace(entry->flags)) {
+			do_warn(
+	_("multiple namespaces for attribute entry %d in attr block %u, inode %" PRIu64 "\n"),
+				i, da_bno, ino);
 			clearit = 1;
 			break;
 		}
@@ -812,7 +879,7 @@ process_leaf_attr_level(xfs_mount_t	*mp,
 		}
 
 		leaf = bp->b_addr;
-		xfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &leafhdr, leaf);
+		libxfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &leafhdr, leaf);
 
 		/* check magic number for leaf directory btree block */
 		if (!(leafhdr.magic == XFS_ATTR_LEAF_MAGIC ||
@@ -1015,7 +1082,7 @@ process_longform_leaf_root(
 	 * check sibling pointers in leaf block or root block 0 before
 	 * we have to release the btree block
 	 */
-	xfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &leafhdr, bp->b_addr);
+	libxfs_attr3_leaf_hdr_from_disk(mp->m_attr_geo, &leafhdr, bp->b_addr);
 	if (leafhdr.forw != 0 || leafhdr.back != 0)  {
 		if (!no_modify)  {
 			do_warn(

@@ -8,40 +8,102 @@
 
 struct action_list {
 	struct list_head	list;
-	unsigned long long	nr;
-	bool			sorted;
 };
 
-int action_lists_alloc(size_t nr, struct action_list **listsp);
-void action_lists_free(struct action_list **listsp);
+struct action_item;
 
-void action_list_init(struct action_list *alist);
+int action_list_alloc(struct action_list **listp);
+void action_list_free(struct action_list **listp);
+static inline void action_list_init(struct action_list *alist)
+{
+	INIT_LIST_HEAD(&alist->list);
+}
+
+unsigned long long action_list_length(struct action_list *alist);
+
+/* Move all the items of @src to the tail of @dst, and reinitialize @src. */
+static inline void
+action_list_merge(
+	struct action_list	*dst,
+	struct action_list	*src)
+{
+	list_splice_tail_init(&src->list, &dst->list);
+}
+
+struct action_item *action_list_pop(struct action_list *alist);
+void action_list_add(struct action_list *alist, struct action_item *aitem);
 
 static inline bool action_list_empty(const struct action_list *alist)
 {
 	return list_empty(&alist->list);
 }
 
-unsigned long long action_list_length(struct action_list *alist);
-void action_list_add(struct action_list *dest, struct action_item *item);
-void action_list_discard(struct action_list *alist);
-void action_list_splice(struct action_list *dest, struct action_list *src);
+enum tryrepair_outcome {
+	/* No progress was made on repairs at all. */
+	TR_NOPROGRESS = 0,
+	/* Some progress was made on repairs; try again soon. */
+	TR_REQUEUE,
+	/* Repairs completely successful. */
+	TR_REPAIRED,
+};
 
-void action_list_find_mustfix(struct action_list *actions,
-		struct action_list *immediate_alist,
-		unsigned long long *broken_primaries,
-		unsigned long long *broken_secondaries);
+int action_item_try_repair(struct scrub_ctx *ctx, struct action_item *aitem,
+		enum tryrepair_outcome *outcome);
 
-/* Passed through to xfs_repair_metadata() */
-#define ALP_REPAIR_ONLY		(XRM_REPAIR_ONLY)
-#define ALP_COMPLAIN_IF_UNFIXED	(XRM_COMPLAIN_IF_UNFIXED)
-#define ALP_NOPROGRESS		(1U << 31)
+void repair_item_mustfix(struct scrub_item *sri, struct scrub_item *fix_now);
 
-int action_list_process(struct scrub_ctx *ctx, int fd,
-		struct action_list *alist, unsigned int repair_flags);
-void action_list_defer(struct scrub_ctx *ctx, xfs_agnumber_t agno,
-		struct action_list *alist);
-int action_list_process_or_defer(struct scrub_ctx *ctx, xfs_agnumber_t agno,
-		struct action_list *alist);
+/* Primary metadata is corrupt */
+#define REPAIR_DIFFICULTY_PRIMARY	(1U << 0)
+/* Secondary metadata is corrupt */
+#define REPAIR_DIFFICULTY_SECONDARY	(1U << 1)
+unsigned int repair_item_difficulty(const struct scrub_item *sri);
+
+/*
+ * Only ask the kernel to repair this object if the kernel directly told us it
+ * was corrupt.  Objects that are only flagged as having cross-referencing
+ * errors or flagged as eligible for optimization are left for later.
+ */
+#define XRM_REPAIR_ONLY		(1U << 0)
+
+/* This is the last repair attempt; complain if still broken even after fix. */
+#define XRM_FINAL_WARNING	(1U << 1)
+
+/* Don't call progress_add after repairing an item. */
+#define XRM_NOPROGRESS		(1U << 2)
+
+int action_list_process(struct scrub_ctx *ctx, struct action_list *alist,
+		unsigned int repair_flags);
+int repair_item_corruption(struct scrub_ctx *ctx, struct scrub_item *sri);
+int repair_file_corruption(struct scrub_ctx *ctx, struct scrub_item *sri,
+		int override_fd);
+int repair_file_corruption_now(struct scrub_ctx *ctx, struct scrub_item *sri,
+		int override_fd);
+int repair_item(struct scrub_ctx *ctx, struct scrub_item *sri,
+		unsigned int repair_flags);
+int repair_item_to_action_item(struct scrub_ctx *ctx,
+		const struct scrub_item *sri, struct action_item **aitemp);
+
+static inline unsigned int
+repair_item_count_needsrepair(
+	const struct scrub_item	*sri)
+{
+	unsigned int		scrub_type;
+	unsigned int		nr = 0;
+
+	foreach_scrub_type(scrub_type)
+		if (sri->sri_state[scrub_type] & SCRUB_ITEM_REPAIR_ANY)
+			nr++;
+	return nr;
+}
+
+static inline int
+repair_item_completely(
+	struct scrub_ctx	*ctx,
+	struct scrub_item	*sri)
+{
+	return repair_item(ctx, sri, XRM_FINAL_WARNING | XRM_NOPROGRESS);
+}
+
+bool repair_want_service_downgrade(struct scrub_ctx *ctx);
 
 #endif /* XFS_SCRUB_REPAIR_H_ */

@@ -18,6 +18,7 @@
 #include "descr.h"
 #include "unicrash.h"
 #include "progress.h"
+#include "libfrog/histogram.h"
 
 /*
  * XFS Online Metadata Scrub (and Repair)
@@ -114,6 +115,7 @@
  * XFS_SCRUB_THREADS		-- start exactly this number of threads
  * XFS_SCRUB_DISK_ERROR_INTERVAL-- simulate a disk error every this many bytes
  * XFS_SCRUB_DISK_VERIFY_SKIP	-- pretend disk verify read calls succeeded
+ * XFS_SCRUB_FORCE_SINGLE	-- fall back to ioctl-per-item scrubbing
  *
  * Available even in non-debug mode:
  * SERVICE_MODE			-- compress all error codes to 1 for LSB
@@ -160,6 +162,9 @@ bool				is_service;
 /* Set to true if the kernel supports XFS_SCRUB_IFLAG_FORCE_REBUILD */
 bool				use_force_rebuild;
 
+/* Should we count informational messages as warnings? */
+bool				info_is_warning;
+
 #define SCRUB_RET_SUCCESS	(0)	/* no problems left behind */
 #define SCRUB_RET_CORRUPT	(1)	/* corruption remains on fs */
 #define SCRUB_RET_UNOPTIMIZED	(2)	/* fs could be optimized */
@@ -179,6 +184,7 @@ usage(void)
 	fprintf(stderr, _("  -k           Do not FITRIM the free space.\n"));
 	fprintf(stderr, _("  -m path      Path to /etc/mtab.\n"));
 	fprintf(stderr, _("  -n           Dry run.  Do not modify anything.\n"));
+	fprintf(stderr, _("  -p           Only optimize, do not fix corruptions.\n"));
 	fprintf(stderr, _("  -T           Display timing/usage information.\n"));
 	fprintf(stderr, _("  -v           Verbose output.\n"));
 	fprintf(stderr, _("  -V           Print version.\n"));
@@ -246,6 +252,7 @@ struct phase_rusage {
 /* Operations for each phase. */
 #define DATASCAN_DUMMY_FN	((void *)1)
 #define REPAIR_DUMMY_FN		((void *)2)
+#define FSTRIM_DUMMY_FN		((void *)3)
 struct phase_ops {
 	char		*descr;
 	int		(*fn)(struct scrub_ctx *ctx);
@@ -427,6 +434,11 @@ run_scrub_phases(
 			.must_run = true,
 		},
 		{
+			.descr = _("Trim filesystem storage."),
+			.fn = FSTRIM_DUMMY_FN,
+			.estimate_work = phase8_estimate,
+		},
+		{
 			NULL
 		},
 	};
@@ -446,16 +458,24 @@ run_scrub_phases(
 		/* Turn on certain phases if user said to. */
 		if (sp->fn == DATASCAN_DUMMY_FN && scrub_data) {
 			sp->fn = phase6_func;
+		} else if (sp->fn == FSTRIM_DUMMY_FN && want_fstrim) {
+			sp->fn = phase8_func;
 		} else if (sp->fn == REPAIR_DUMMY_FN &&
 			   ctx->mode == SCRUB_MODE_REPAIR) {
 			sp->descr = _("Repair filesystem.");
+			sp->fn = phase4_func;
+			sp->must_run = true;
+		} else if (sp->fn == REPAIR_DUMMY_FN &&
+			   ctx->mode == SCRUB_MODE_PREEN) {
+			sp->descr = _("Optimize filesystem.");
 			sp->fn = phase4_func;
 			sp->must_run = true;
 		}
 
 		/* Skip certain phases unless they're turned on. */
 		if (sp->fn == REPAIR_DUMMY_FN ||
-		    sp->fn == DATASCAN_DUMMY_FN)
+		    sp->fn == DATASCAN_DUMMY_FN ||
+		    sp->fn == FSTRIM_DUMMY_FN)
 			continue;
 
 		/* Allow debug users to force a particular phase. */
@@ -504,6 +524,10 @@ _("Scrub aborted after phase %d."),
 		descr_end_phase();
 		ret = phase_end(&pi, phase);
 		if (ret)
+			break;
+
+		/* Did background scrub get canceled on us? */
+		if (ctx->mode == SCRUB_MODE_NONE)
 			break;
 
 		/* Too many errors? */
@@ -588,7 +612,7 @@ report_outcome(
 	if (ctx->scrub_setup_succeeded && actionable_errors > 0) {
 		char		*msg;
 
-		if (ctx->mode == SCRUB_MODE_DRY_RUN)
+		if (ctx->mode != SCRUB_MODE_REPAIR)
 			msg = _("%s: Re-run xfs_scrub without -n.\n");
 		else
 			msg = _("%s: Unmount and run xfs_repair.\n");
@@ -604,12 +628,95 @@ report_outcome(
 # define XFS_SCRUB_HAVE_UNICODE	"-"
 #endif
 
+/*
+ * -o: user-supplied override options
+ */
+enum o_opt_nums {
+	IWARN = 0,
+	FSTRIM_PCT,
+	AUTOFSCK,
+	O_MAX_OPTS,
+};
+
+static char *o_opts[] = {
+	[IWARN]			= "iwarn",
+	[FSTRIM_PCT]		= "fstrim_pct",
+	[AUTOFSCK]		= "autofsck",
+	[O_MAX_OPTS]		= NULL,
+};
+
+static void
+parse_o_opts(
+	struct scrub_ctx	*ctx,
+	char			*p)
+{
+	double			dval;
+
+	while (*p != '\0')  {
+		char		*val;
+		char		*endp;
+
+		switch (getsubopt(&p, o_opts, &val))  {
+		case IWARN:
+			if (val) {
+				fprintf(stderr,
+ _("iwarn does not take an argument\n"));
+				usage();
+			}
+			info_is_warning = true;
+			break;
+		case FSTRIM_PCT:
+			if (!val) {
+				fprintf(stderr,
+ _("-o fstrim_pct requires a parameter\n"));
+				usage();
+			}
+
+			errno = 0;
+			dval = strtod(val, &endp);
+
+			if (*endp) {
+				fprintf(stderr,
+ _("-o fstrim_pct must be a floating point number\n"));
+				usage();
+			}
+			if (errno) {
+				fprintf(stderr,
+ _("-o fstrim_pct: %s\n"),
+						strerror(errno));
+				usage();
+			}
+			if (dval <= 0 || dval > 100) {
+				fprintf(stderr,
+ _("-o fstrim_pct must be larger than 0 and less than 100\n"));
+				usage();
+			}
+
+			ctx->fstrim_block_pct = dval / 100.0;
+			break;
+		case AUTOFSCK:
+			if (val) {
+				fprintf(stderr,
+ _("-o autofsck does not take an argument\n"));
+				usage();
+			}
+			ctx->mode = SCRUB_MODE_NONE;
+			break;
+		default:
+			usage();
+			break;
+		}
+	}
+}
+
 int
 main(
 	int			argc,
 	char			**argv)
 {
-	struct scrub_ctx	ctx = {0};
+	struct scrub_ctx	ctx = {
+		.fstrim_block_pct = FSTRIM_BLOCK_PCT_DEFAULT,
+	};
 	struct phase_rusage	all_pi;
 	char			*mtab = NULL;
 	FILE			*progress_fp = NULL;
@@ -619,6 +726,8 @@ main(
 	int			fd;
 	int			ret = SCRUB_RET_SUCCESS;
 	int			error;
+
+	hist_init(&ctx.datadev_hist);
 
 	fprintf(stdout, "EXPERIMENTAL xfs_scrub program in use! Use at your own risk!\n");
 	fflush(stdout);
@@ -637,7 +746,7 @@ main(
 	pthread_mutex_init(&ctx.lock, NULL);
 	ctx.mode = SCRUB_MODE_REPAIR;
 	ctx.error_action = ERRORS_CONTINUE;
-	while ((c = getopt(argc, argv, "a:bC:de:km:nTvxV")) != EOF) {
+	while ((c = getopt(argc, argv, "a:bC:de:kM:m:no:pTvxV")) != EOF) {
 		switch (c) {
 		case 'a':
 			ctx.max_errors = cvt_u64(optarg, 10);
@@ -681,11 +790,28 @@ main(
 		case 'k':
 			want_fstrim = false;
 			break;
+		case 'M':
+			ctx.actual_mntpoint = optarg;
+			break;
 		case 'm':
 			mtab = optarg;
 			break;
 		case 'n':
+			if (ctx.mode != SCRUB_MODE_REPAIR) {
+				fprintf(stderr, _("Cannot use -n with -p.\n"));
+				usage();
+			}
 			ctx.mode = SCRUB_MODE_DRY_RUN;
+			break;
+		case 'o':
+			parse_o_opts(&ctx, optarg);
+			break;
+		case 'p':
+			if (ctx.mode != SCRUB_MODE_REPAIR) {
+				fprintf(stderr, _("Cannot use -p with -n.\n"));
+				usage();
+			}
+			ctx.mode = SCRUB_MODE_PREEN;
 			break;
 		case 'T':
 			display_rusage = true;
@@ -732,6 +858,8 @@ main(
 		usage();
 
 	ctx.mntpoint = argv[optind];
+	if (!ctx.actual_mntpoint)
+		ctx.actual_mntpoint = ctx.mntpoint;
 
 	stdout_isatty = isatty(STDOUT_FILENO);
 	stderr_isatty = isatty(STDERR_FILENO);
@@ -749,7 +877,7 @@ main(
 		return SCRUB_RET_OPERROR;
 
 	/* Find the mount record for the passed-in argument. */
-	if (stat(argv[optind], &ctx.mnt_sb) < 0) {
+	if (stat(ctx.actual_mntpoint, &ctx.mnt_sb) < 0) {
 		fprintf(stderr,
 			_("%s: could not stat: %s: %s\n"),
 			progname, argv[optind], strerror(errno));
@@ -772,7 +900,7 @@ main(
 	}
 
 	fs_table_initialise(0, NULL, 0, NULL);
-	fsp = fs_table_lookup_mount(ctx.mntpoint);
+	fsp = fs_table_lookup_mount(ctx.actual_mntpoint);
 	if (!fsp) {
 		fprintf(stderr, _("%s: Not a XFS mount point.\n"),
 				ctx.mntpoint);
@@ -826,10 +954,12 @@ out:
 	if (ctx.runtime_errors)
 		ret |= SCRUB_RET_OPERROR;
 	phase_end(&all_pi, 0);
-	if (progress_fp)
+	if (progress_fp && fileno(progress_fp) != 1)
 		fclose(progress_fp);
 out_unicrash:
 	unicrash_unload();
+
+	hist_free(&ctx.datadev_hist);
 
 	/*
 	 * If we're being run as a service, the return code must fit the LSB

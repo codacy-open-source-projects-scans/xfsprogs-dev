@@ -15,6 +15,7 @@
  */
 #define LIBXFS_ATTR_ROOT		XFS_ATTR_ROOT
 #define LIBXFS_ATTR_SECURE		XFS_ATTR_SECURE
+#define LIBXFS_ATTR_PARENT		XFS_ATTR_PARENT
 
 #define xfs_agfl_size			libxfs_agfl_size
 #define xfs_agfl_walk			libxfs_agfl_walk
@@ -36,14 +37,23 @@
 
 #define xfs_ascii_ci_hashname		libxfs_ascii_ci_hashname
 
+#define xfs_attr3_leaf_hdr_from_disk	libxfs_attr3_leaf_hdr_from_disk
+#define xfs_attr3_leaf_read		libxfs_attr3_leaf_read
+#define xfs_attr_check_namespace	libxfs_attr_check_namespace
 #define xfs_attr_get			libxfs_attr_get
+#define xfs_attr_hashname		libxfs_attr_hashname
+#define xfs_attr_hashval		libxfs_attr_hashval
+#define xfs_attr_is_leaf		libxfs_attr_is_leaf
 #define xfs_attr_leaf_newentsize	libxfs_attr_leaf_newentsize
 #define xfs_attr_namecheck		libxfs_attr_namecheck
+#define xfs_attr_removename		libxfs_attr_removename
 #define xfs_attr_set			libxfs_attr_set
+#define xfs_attr_sethash		libxfs_attr_sethash
 #define xfs_attr_sf_firstentry		libxfs_attr_sf_firstentry
 #define xfs_attr_shortform_verify	libxfs_attr_shortform_verify
 
 #define __xfs_bmap_add_free		__libxfs_bmap_add_free
+#define xfs_bmap_add_attrfork		libxfs_bmap_add_attrfork
 #define xfs_bmap_validate_extent	libxfs_bmap_validate_extent
 #define xfs_bmapi_read			libxfs_bmapi_read
 #define xfs_bmapi_remap			libxfs_bmapi_remap
@@ -98,7 +108,9 @@
 #define xfs_calc_dquots_per_chunk	libxfs_calc_dquots_per_chunk
 #define xfs_cntbt_init_cursor		libxfs_cntbt_init_cursor
 #define xfs_compute_rextslog		libxfs_compute_rextslog
+#define xfs_create_space_res		libxfs_create_space_res
 #define xfs_da3_node_hdr_from_disk	libxfs_da3_node_hdr_from_disk
+#define xfs_da3_node_read		libxfs_da3_node_read
 #define xfs_da_get_buf			libxfs_da_get_buf
 #define xfs_da_hashname			libxfs_da_hashname
 #define xfs_da_read_buf			libxfs_da_read_buf
@@ -121,9 +133,8 @@
 #define xfs_dir2_data_use_free		libxfs_dir2_data_use_free
 #define xfs_dir2_free_hdr_from_disk	libxfs_dir2_free_hdr_from_disk
 #define xfs_dir2_hashname		libxfs_dir2_hashname
-#define xfs_dir2_isblock		libxfs_dir2_isblock
-#define xfs_dir2_isleaf			libxfs_dir2_isleaf
 #define xfs_dir2_leaf_hdr_from_disk	libxfs_dir2_leaf_hdr_from_disk
+#define xfs_dir2_format			libxfs_dir2_format
 #define xfs_dir2_namecheck		libxfs_dir2_namecheck
 #define xfs_dir2_sf_entsize		libxfs_dir2_sf_entsize
 #define xfs_dir2_sf_get_ftype		libxfs_dir2_sf_get_ftype
@@ -139,11 +150,15 @@
 #define xfs_dir_init			libxfs_dir_init
 #define xfs_dir_ino_validate		libxfs_dir_ino_validate
 #define xfs_dir_lookup			libxfs_dir_lookup
+#define xfs_dir_removename		libxfs_dir_removename
 #define xfs_dir_replace			libxfs_dir_replace
 
 #define xfs_dqblk_repair		libxfs_dqblk_repair
 #define xfs_dquot_from_disk_ts		libxfs_dquot_from_disk_ts
 #define xfs_dquot_verify		libxfs_dquot_verify
+
+#define xfs_bumplink			libxfs_bumplink
+#define xfs_droplink			libxfs_droplink
 
 #define xfs_finobt_calc_reserves	libxfs_finobt_calc_reserves
 #define xfs_finobt_init_cursor		libxfs_finobt_init_cursor
@@ -174,6 +189,7 @@
 #define xfs_inobt_stage_cursor		libxfs_inobt_stage_cursor
 #define xfs_inode_from_disk		libxfs_inode_from_disk
 #define xfs_inode_from_disk_ts		libxfs_inode_from_disk_ts
+#define xfs_inode_hasattr		libxfs_inode_hasattr
 #define xfs_inode_to_disk		libxfs_inode_to_disk
 #define xfs_inode_validate_cowextsize	libxfs_inode_validate_cowextsize
 #define xfs_inode_validate_extsize	libxfs_inode_validate_extsize
@@ -182,10 +198,21 @@
 
 #define xfs_iread_extents		libxfs_iread_extents
 #define xfs_irele			libxfs_irele
+#define xfs_link_space_res		libxfs_link_space_res
 #define xfs_log_calc_minimum_size	libxfs_log_calc_minimum_size
 #define xfs_log_get_max_trans_res	libxfs_log_get_max_trans_res
 #define xfs_log_sb			libxfs_log_sb
 #define xfs_mode_to_ftype		libxfs_mode_to_ftype
+#define xfs_mkdir_space_res		libxfs_mkdir_space_res
+#define xfs_parent_addname		libxfs_parent_addname
+#define xfs_parent_finish		libxfs_parent_finish
+#define xfs_parent_hashval		libxfs_parent_hashval
+#define xfs_parent_lookup		libxfs_parent_lookup
+#define xfs_parent_removename		libxfs_parent_removename
+#define xfs_parent_set			libxfs_parent_set
+#define xfs_parent_start		libxfs_parent_start
+#define xfs_parent_from_attr		libxfs_parent_from_attr
+#define xfs_parent_unset		libxfs_parent_unset
 #define xfs_perag_get			libxfs_perag_get
 #define xfs_perag_hold			libxfs_perag_hold
 #define xfs_perag_put			libxfs_perag_put
@@ -202,6 +229,7 @@
 #define xfs_refcountbt_stage_cursor	libxfs_refcountbt_stage_cursor
 #define xfs_refcount_get_rec		libxfs_refcount_get_rec
 #define xfs_refcount_lookup_le		libxfs_refcount_lookup_le
+#define xfs_remove_space_res		libxfs_remove_space_res
 
 #define xfs_rmap_alloc			libxfs_rmap_alloc
 #define xfs_rmapbt_calc_reserves	libxfs_rmapbt_calc_reserves

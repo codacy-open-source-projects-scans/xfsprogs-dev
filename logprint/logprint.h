@@ -59,10 +59,17 @@ extern void xlog_recover_print_bud(struct xlog_recover_item *item);
 #define MAX_ATTR_VAL_PRINT	128
 
 extern int xlog_print_trans_attri(char **ptr, uint src_len, int *i);
-extern int xlog_print_trans_attri_name(char **ptr, uint src_len);
-extern int xlog_print_trans_attri_value(char **ptr, uint src_len, int value_len);
+int xlog_print_trans_attri_name(char **ptr, uint src_len, const char *tag);
+int xlog_print_trans_attri_value(char **ptr, uint src_len, int value_len,
+		const char *tag);
 extern void xlog_recover_print_attri(struct xlog_recover_item *item);
 extern int xlog_print_trans_attrd(char **ptr, uint len);
 extern void xlog_recover_print_attrd(struct xlog_recover_item *item);
 extern void xlog_print_op_header(xlog_op_header_t *op_head, int i, char **ptr);
+
+int xlog_print_trans_xmi(char **ptr, uint src_len, int continued);
+void xlog_recover_print_xmi(struct xlog_recover_item *item);
+int xlog_print_trans_xmd(char **ptr, uint len);
+void xlog_recover_print_xmd(struct xlog_recover_item *item);
+
 #endif	/* LOGPRINT_H */

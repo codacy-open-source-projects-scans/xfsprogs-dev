@@ -182,6 +182,34 @@ set_nrext64(
 	return true;
 }
 
+static bool
+set_exchrange(
+	struct xfs_mount	*mp,
+	struct xfs_sb		*new_sb)
+{
+	if (xfs_has_exchange_range(mp)) {
+		printf(_("Filesystem already supports exchange-range.\n"));
+		exit(0);
+	}
+
+	if (!xfs_has_crc(mp)) {
+		printf(
+	_("File exchange-range feature only supported on V5 filesystems.\n"));
+		exit(0);
+	}
+
+	if (!xfs_has_reflink(mp)) {
+		printf(
+	_("File exchange-range feature cannot be added without reflink.\n"));
+		exit(0);
+	}
+
+	printf(_("Adding file exchange-range support to filesystem.\n"));
+	new_sb->sb_features_ro_compat |= XFS_SB_FEAT_INCOMPAT_EXCHRANGE;
+	new_sb->sb_features_incompat |= XFS_SB_FEAT_INCOMPAT_NEEDSREPAIR;
+	return true;
+}
+
 struct check_state {
 	struct xfs_sb		sb;
 	uint64_t		features;
@@ -219,6 +247,137 @@ install_new_state(
 	mp->m_features |= libxfs_sb_version_to_features(new_sb);
 	libxfs_compute_all_maxlevels(mp);
 	libxfs_trans_init(mp);
+}
+
+#define GIGABYTES(count, blog)     ((uint64_t)(count) << (30 - (blog)))
+static inline bool
+check_free_space(
+	struct xfs_mount	*mp,
+	unsigned long long	avail,
+	unsigned long long	total)
+{
+	/* Ok if there's more than 10% free. */
+	if (avail >= total / 10)
+		return true;
+
+	/* Not ok if there's less than 5% free. */
+	if (avail < total / 5)
+		return false;
+
+	/* Let it slide if there's at least 10GB free. */
+	return avail > GIGABYTES(10, mp->m_sb.sb_blocklog);
+}
+
+static void
+check_fs_free_space(
+	struct xfs_mount		*mp,
+	const struct check_state	*old,
+	struct xfs_sb			*new_sb)
+{
+	struct xfs_perag		*pag;
+	xfs_agnumber_t			agno;
+	int				error;
+
+	/* Make sure we have enough space for per-AG reservations. */
+	for_each_perag(mp, agno, pag) {
+		struct xfs_trans	*tp;
+		struct xfs_agf		*agf;
+		struct xfs_buf		*agi_bp, *agf_bp;
+		unsigned int		avail, agblocks;
+
+		/* Put back the old super so that we can read AG headers. */
+		restore_old_state(mp, old);
+
+		/*
+		 * Create a dummy transaction so that we can load the AGI and
+		 * AGF buffers in memory with the old fs geometry and pin them
+		 * there while we try to make a per-AG reservation with the new
+		 * geometry.
+		 */
+		error = -libxfs_trans_alloc_empty(mp, &tp);
+		if (error)
+			do_error(
+	_("Cannot reserve resources for upgrade check, err=%d.\n"),
+					error);
+
+		error = -libxfs_ialloc_read_agi(pag, tp, 0, &agi_bp);
+		if (error)
+			do_error(
+	_("Cannot read AGI %u for upgrade check, err=%d.\n"),
+					pag->pag_agno, error);
+
+		error = -libxfs_alloc_read_agf(pag, tp, 0, &agf_bp);
+		if (error)
+			do_error(
+	_("Cannot read AGF %u for upgrade check, err=%d.\n"),
+					pag->pag_agno, error);
+		agf = agf_bp->b_addr;
+		agblocks = be32_to_cpu(agf->agf_length);
+
+		/*
+		 * Install the new superblock and try to make a per-AG space
+		 * reservation with the new geometry.  We pinned the AG header
+		 * buffers to the transaction, so we shouldn't hit any
+		 * corruption errors on account of the new geometry.
+		 */
+		install_new_state(mp, new_sb);
+
+		error = -libxfs_ag_resv_init(pag, tp);
+		if (error == ENOSPC) {
+			printf(
+	_("Not enough free space would remain in AG %u for metadata.\n"),
+					pag->pag_agno);
+			exit(1);
+		}
+		if (error)
+			do_error(
+	_("Error %d while checking AG %u space reservation.\n"),
+					error, pag->pag_agno);
+
+		/*
+		 * Would the post-upgrade filesystem have enough free space in
+		 * this AG after making per-AG reservations?
+		 */
+		avail = pag->pagf_freeblks + pag->pagf_flcount;
+		avail -= pag->pag_meta_resv.ar_reserved;
+		avail -= pag->pag_rmapbt_resv.ar_asked;
+
+		if (!check_free_space(mp, avail, agblocks)) {
+			printf(
+	_("AG %u will be low on space after upgrade.\n"),
+					pag->pag_agno);
+			exit(1);
+		}
+		libxfs_trans_cancel(tp);
+	}
+
+	/*
+	 * Would the post-upgrade filesystem have enough free space on the data
+	 * device after making per-AG reservations?
+	 */
+	if (!check_free_space(mp, mp->m_sb.sb_fdblocks, mp->m_sb.sb_dblocks)) {
+		printf(_("Filesystem will be low on space after upgrade.\n"));
+		exit(1);
+	}
+
+	/*
+	 * Release the per-AG reservations and mark the per-AG structure as
+	 * uninitialized so that we don't trip over stale cached counters
+	 * after the upgrade/
+	 */
+	for_each_perag(mp, agno, pag) {
+		libxfs_ag_resv_free(pag);
+		clear_bit(XFS_AGSTATE_AGF_INIT, &pag->pag_opstate);
+		clear_bit(XFS_AGSTATE_AGI_INIT, &pag->pag_opstate);
+	}
+}
+
+static bool
+need_check_fs_free_space(
+	struct xfs_mount		*mp,
+	const struct check_state	*old)
+{
+	return false;
 }
 
 /*
@@ -263,6 +422,9 @@ install_new_geometry(
 		exit(1);
 	}
 
+	if (need_check_fs_free_space(mp, &old))
+		check_fs_free_space(mp, &old, new_sb);
+
 	/*
 	 * Restore the old state to get everything back to a clean state,
 	 * upgrade the featureset one more time, and recompute the btree max
@@ -290,6 +452,8 @@ upgrade_filesystem(
 		dirty |= set_bigtime(mp, &new_sb);
 	if (add_nrext64)
 		dirty |= set_nrext64(mp, &new_sb);
+	if (add_exchrange)
+		dirty |= set_exchrange(mp, &new_sb);
 	if (!dirty)
 		return;
 

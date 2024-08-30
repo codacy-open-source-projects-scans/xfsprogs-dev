@@ -18,6 +18,7 @@
 #include "dinode.h"
 #include "progress.h"
 #include "versions.h"
+#include "repair/pptr.h"
 
 static struct cred		zerocr;
 static struct fsxattr 		zerofsx;
@@ -903,6 +904,12 @@ mk_orphanage(xfs_mount_t *mp)
 	const int	mode = 0755;
 	int		nres;
 	struct xfs_name	xname;
+	struct xfs_parent_args *ppargs = NULL;
+
+	i = -libxfs_parent_start(mp, &ppargs);
+	if (i)
+		do_error(_("%d - couldn't allocate parent pointer for %s\n"),
+			i, ORPHANAGE);
 
 	/*
 	 * check for an existing lost+found first, if it exists, return
@@ -919,13 +926,15 @@ mk_orphanage(xfs_mount_t *mp)
 	xname.len = strlen(ORPHANAGE);
 	xname.type = XFS_DIR3_FT_DIR;
 
-	if (libxfs_dir_lookup(NULL, pip, &xname, &ino, NULL) == 0)
-		return ino;
+	/* If the lookup of /lost+found succeeds, return the inumber. */
+	error = -libxfs_dir_lookup(NULL, pip, &xname, &ino, NULL);
+	if (error == 0)
+		goto out_pip;
 
 	/*
 	 * could not be found, create it
 	 */
-	nres = XFS_MKDIR_SPACE_RES(mp, xname.len);
+	nres = libxfs_mkdir_space_res(mp, xname.len);
 	i = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_mkdir, nres, 0, 0, &tp);
 	if (i)
 		res_failed(i);
@@ -945,7 +954,7 @@ mk_orphanage(xfs_mount_t *mp)
 		do_error(_("%s inode allocation failed %d\n"),
 			ORPHANAGE, error);
 	}
-	inc_nlink(VFS_I(ip));		/* account for . */
+	libxfs_bumplink(tp, ip);		/* account for . */
 	ino = ip->i_ino;
 
 	irec = find_inode_rec(mp,
@@ -991,13 +1000,22 @@ mk_orphanage(xfs_mount_t *mp)
 		do_error(
 		_("can't make %s, createname error %d\n"),
 			ORPHANAGE, error);
+	add_parent_ptr(ip->i_ino, (unsigned char *)ORPHANAGE, pip, false);
+
+	if (ppargs) {
+		error = -libxfs_parent_addname(tp, ppargs, pip, &xname, ip);
+		if (error)
+			do_error(
+ _("can't make %s, parent addname error %d\n"),
+					ORPHANAGE, error);
+	}
 
 	/*
 	 * bump up the link count in the root directory to account
 	 * for .. in the new directory, and update the irec copy of the
 	 * on-disk nlink so we don't fail the link count check later.
 	 */
-	inc_nlink(VFS_I(pip));
+	libxfs_bumplink(tp, pip);
 	irec = find_inode_rec(mp, XFS_INO_TO_AGNO(mp, mp->m_sb.sb_rootino),
 				  XFS_INO_TO_AGINO(mp, mp->m_sb.sb_rootino));
 	add_inode_ref(irec, 0);
@@ -1012,9 +1030,52 @@ mk_orphanage(xfs_mount_t *mp)
 			ORPHANAGE, error);
 	}
 	libxfs_irele(ip);
+out_pip:
 	libxfs_irele(pip);
+	libxfs_parent_finish(mp, ppargs);
 
 	return(ino);
+}
+
+/*
+ * Add a parent pointer back to the orphanage for any file we're moving into
+ * the orphanage, being careful not to trip over any existing parent pointer.
+ * You never know when the orphanage might get corrupted.
+ */
+static void
+add_orphan_pptr(
+	struct xfs_trans	*tp,
+	struct xfs_inode	*orphanage_ip,
+	const struct xfs_name	*xname,
+	struct xfs_inode	*ip,
+	struct xfs_parent_args	*ppargs)
+{
+	struct xfs_parent_rec	pptr = { };
+	struct xfs_da_args	scratch;
+	int			error;
+
+	xfs_inode_to_parent_rec(&pptr, orphanage_ip);
+	error = -libxfs_parent_lookup(tp, ip, xname, &pptr, &scratch);
+	if (!error)
+		return;
+	if (error != ENOATTR)
+		do_log(
+ _("cannot look up parent pointer for '%.*s', err %d\n"),
+				xname->len, xname->name, error);
+
+	if (!xfs_inode_has_attr_fork(ip)) {
+		error = -libxfs_bmap_add_attrfork(tp, ip,
+				sizeof(struct xfs_attr_sf_hdr), true);
+		if (error)
+			do_error(_("can't add attr fork to inode 0x%llx\n"),
+					(unsigned long long)ip->i_ino);
+	}
+
+	error = -libxfs_parent_addname(tp, ppargs, orphanage_ip, xname, ip);
+	if (error)
+		do_error(
+ _("can't add parent pointer for '%.*s', error %d\n"),
+				xname->len, xname->name, error);
 }
 
 /*
@@ -1037,6 +1098,13 @@ mv_orphanage(
 	ino_tree_node_t		*irec;
 	int			ino_offset = 0;
 	struct xfs_name		xname;
+	struct xfs_parent_args	*ppargs;
+
+	err = -libxfs_parent_start(mp, &ppargs);
+	if (err)
+		do_error(
+ _("%d - couldn't allocate parent pointer for lost inode\n"),
+			err);
 
 	xname.name = fname;
 	xname.len = snprintf((char *)fname, sizeof(fname), "%llu",
@@ -1088,10 +1156,14 @@ mv_orphanage(
 				do_error(
 	_("name create failed in %s (%d)\n"), ORPHANAGE, err);
 
+			if (ppargs)
+				add_orphan_pptr(tp, orphanage_ip, &xname,
+						ino_p, ppargs);
+
 			if (irec)
 				add_inode_ref(irec, ino_offset);
 			else
-				inc_nlink(VFS_I(orphanage_ip));
+				libxfs_bumplink(tp, orphanage_ip);
 			libxfs_trans_log_inode(tp, orphanage_ip, XFS_ILOG_CORE);
 
 			err = -libxfs_dir_createname(tp, ino_p, &xfs_name_dotdot,
@@ -1100,7 +1172,7 @@ mv_orphanage(
 				do_error(
 	_("creation of .. entry failed (%d)\n"), err);
 
-			inc_nlink(VFS_I(ino_p));
+			libxfs_bumplink(tp, ino_p);
 			libxfs_trans_log_inode(tp, ino_p, XFS_ILOG_CORE);
 			err = -libxfs_trans_commit(tp);
 			if (err)
@@ -1122,10 +1194,14 @@ mv_orphanage(
 				do_error(
 	_("name create failed in %s (%d)\n"), ORPHANAGE, err);
 
+			if (ppargs)
+				add_orphan_pptr(tp, orphanage_ip, &xname,
+						ino_p, ppargs);
+
 			if (irec)
 				add_inode_ref(irec, ino_offset);
 			else
-				inc_nlink(VFS_I(orphanage_ip));
+				libxfs_bumplink(tp, orphanage_ip);
 			libxfs_trans_log_inode(tp, orphanage_ip, XFS_ILOG_CORE);
 
 			/*
@@ -1170,6 +1246,10 @@ mv_orphanage(
 	_("name create failed in %s (%d)\n"), ORPHANAGE, err);
 		ASSERT(err == 0);
 
+		if (ppargs)
+			add_orphan_pptr(tp, orphanage_ip, &xname, ino_p,
+					ppargs);
+
 		set_nlink(VFS_I(ino_p), 1);
 		libxfs_trans_log_inode(tp, ino_p, XFS_ILOG_CORE);
 		err = -libxfs_trans_commit(tp);
@@ -1177,8 +1257,13 @@ mv_orphanage(
 			do_error(
 	_("orphanage name create failed (%d)\n"), err);
 	}
+
+	if (xfs_has_parent(mp))
+		add_parent_ptr(ino_p->i_ino, xname.name, orphanage_ip, false);
+
 	libxfs_irele(ino_p);
 	libxfs_irele(orphanage_ip);
+	libxfs_parent_finish(mp, ppargs);
 }
 
 static int
@@ -1280,7 +1365,7 @@ longform_dir2_rebuild(
 	    libxfs_dir_ino_validate(mp, pip.i_ino))
 		pip.i_ino = mp->m_sb.sb_rootino;
 
-	nres = XFS_REMOVE_SPACE_RES(mp);
+	nres = libxfs_remove_space_res(mp, 0);
 	error = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_remove, nres, 0, 0, &tp);
 	if (error)
 		res_failed(error);
@@ -1340,7 +1425,7 @@ longform_dir2_rebuild(
 						p->name.name[1] == '.'))))
 			continue;
 
-		nres = XFS_CREATE_SPACE_RES(mp, p->name.len);
+		nres = libxfs_create_space_res(mp, p->name.len);
 		error = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_create,
 					    nres, 0, 0, &tp);
 		if (error)
@@ -1386,7 +1471,7 @@ dir2_kill_block(
 	int		nres;
 	xfs_trans_t	*tp;
 
-	nres = XFS_REMOVE_SPACE_RES(mp);
+	nres = libxfs_remove_space_res(mp, 0);
 	error = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_remove, nres, 0, 0, &tp);
 	if (error)
 		res_failed(error);
@@ -1398,6 +1483,7 @@ dir2_kill_block(
 	args.trans = tp;
 	args.whichfork = XFS_DATA_FORK;
 	args.geo = mp->m_dir_geo;
+	args.owner = ip->i_ino;
 	if (da_bno >= mp->m_dir_geo->leafblk && da_bno < mp->m_dir_geo->freeblk)
 		error = -libxfs_da_shrink_inode(&args, da_bno, bp);
 	else
@@ -1502,6 +1588,7 @@ longform_dir2_entry_check_data(
 	struct xfs_da_args	da = {
 		.dp = ip,
 		.geo = mp->m_dir_geo,
+		.owner = ip->i_ino,
 	};
 
 
@@ -2266,12 +2353,12 @@ longform_dir2_entry_check(
 	xfs_dablk_t		da_bno;
 	freetab_t		*freetab;
 	int			i;
-	bool			isblock;
-	bool			isleaf;
+	enum xfs_dir2_fmt	fmt;
 	xfs_fileoff_t		next_da_bno;
 	int			seeval;
 	int			fixit = 0;
 	struct xfs_da_args	args;
+	int			error;
 
 	*need_dot = 1;
 	freetab = malloc(FREETAB_SIZE(ip->i_disk_size / mp->m_dir_geo->blksize));
@@ -2291,8 +2378,8 @@ longform_dir2_entry_check(
 	/* is this a block, leaf, or node directory? */
 	args.dp = ip;
 	args.geo = mp->m_dir_geo;
-	libxfs_dir2_isblock(&args, &isblock);
-	libxfs_dir2_isleaf(&args, &isleaf);
+	args.owner = ip->i_ino;
+	fmt = libxfs_dir2_format(&args, &error);
 
 	/* check directory "data" blocks (ie. name/inode pairs) */
 	for (da_bno = 0, next_da_bno = 0;
@@ -2315,7 +2402,7 @@ longform_dir2_entry_check(
 			break;
 		}
 
-		if (isblock)
+		if (fmt == XFS_DIR2_FMT_BLOCK)
 			ops = &xfs_dir3_block_buf_ops;
 		else
 			ops = &xfs_dir3_data_buf_ops;
@@ -2332,7 +2419,7 @@ longform_dir2_entry_check(
 			 * block form and we fail, there isn't anything else to
 			 * read, and nothing we can do but trash it.
 			 */
-			if (isblock) {
+			if (fmt == XFS_DIR2_FMT_BLOCK) {
 				fixit++;
 				goto out_fix;
 			}
@@ -2346,7 +2433,7 @@ longform_dir2_entry_check(
 			error = check_dir3_header(mp, bp, ino);
 			if (error) {
 				fixit++;
-				if (isblock)
+				if (fmt == XFS_DIR2_FMT_BLOCK)
 					goto out_fix;
 
 				libxfs_buf_relse(bp);
@@ -2357,8 +2444,8 @@ longform_dir2_entry_check(
 
 		longform_dir2_entry_check_data(mp, ip, num_illegal, need_dot,
 				irec, ino_offset, bp, hashtab,
-				&freetab, da_bno, isblock);
-		if (isblock)
+				&freetab, da_bno, fmt == XFS_DIR2_FMT_BLOCK);
+		if (fmt == XFS_DIR2_FMT_BLOCK)
 			break;
 
 		libxfs_buf_relse(bp);
@@ -2368,7 +2455,7 @@ longform_dir2_entry_check(
 
 	if (!dotdot_update) {
 		/* check btree and freespace */
-		if (isblock) {
+		if (fmt == XFS_DIR2_FMT_BLOCK) {
 			struct xfs_dir2_data_hdr *block;
 			xfs_dir2_block_tail_t	*btp;
 			xfs_dir2_leaf_entry_t	*blp;
@@ -2381,7 +2468,7 @@ longform_dir2_entry_check(
 						be32_to_cpu(btp->stale));
 			if (dir_hash_check(hashtab, ip, seeval))
 				fixit |= 1;
-		} else if (isleaf) {
+		} else if (fmt == XFS_DIR2_FMT_LEAF) {
 			fixit |= longform_dir2_check_leaf(mp, ip, hashtab,
 								freetab);
 		} else {
@@ -2481,6 +2568,7 @@ shortform_dir2_entry_check(
 	struct xfs_dir2_sf_entry *next_sfep;
 	struct xfs_ifork	*ifp;
 	struct ino_tree_node	*irec;
+	xfs_dir2_dataptr_t	diroffset;
 	int			max_size;
 	int			ino_offset;
 	int			i;
@@ -2658,8 +2746,9 @@ shortform_dir2_entry_check(
 		/*
 		 * check for duplicate names in directory.
 		 */
-		dup_inum = dir_hash_add(mp, hashtab, (xfs_dir2_dataptr_t)
-				(sfep - xfs_dir2_sf_firstentry(sfp)),
+		diroffset = xfs_dir2_byte_to_dataptr(
+				xfs_dir2_sf_get_offset(sfep));
+		dup_inum = dir_hash_add(mp, hashtab, diroffset,
 				lino, sfep->namelen, sfep->name,
 				libxfs_dir2_sf_get_ftype(mp, sfep));
 		if (dup_inum != NULLFSINO) {
@@ -2694,6 +2783,7 @@ _("entry \"%s\" (ino %" PRIu64 ") in dir %" PRIu64 " already points to ino %" PR
 				next_sfep = shortform_dir2_junk(mp, sfp, sfep,
 						lino, &max_size, &i,
 						&bytes_deleted, ino_dirty);
+				dir_hash_junkit(hashtab, diroffset);
 				continue;
 			} else if (parent == ino)  {
 				add_inode_reached(irec, ino_offset);
@@ -2718,6 +2808,7 @@ _("entry \"%s\" (ino %" PRIu64 ") in dir %" PRIu64 " already points to ino %" PR
 				next_sfep = shortform_dir2_junk(mp, sfp, sfep,
 						lino, &max_size, &i,
 						&bytes_deleted, ino_dirty);
+				dir_hash_junkit(hashtab, diroffset);
 				continue;
 			}
 		}
@@ -2806,6 +2897,30 @@ _("entry \"%s\" (ino %" PRIu64 ") in dir %" PRIu64 " already points to ino %" PR
 	_("setting size to %" PRId64 " bytes to reflect junked entries\n"),
 			ip->i_disk_size);
 		*ino_dirty = 1;
+	}
+}
+
+static void
+dir_hash_add_parent_ptrs(
+	struct xfs_inode	*dp,
+	struct dir_hash_tab	*hashtab)
+{
+	struct dir_hash_ent	*p;
+
+	if (!xfs_has_parent(dp->i_mount))
+		return;
+
+	for (p = hashtab->first; p; p = p->nextbyorder) {
+		if (p->junkit)
+			continue;
+		if (p->name.name[0] == '/')
+			continue;
+		if (p->name.name[0] == '.' &&
+		    (p->name.len == 1 ||
+		     (p->name.len == 2 && p->name.name[1] == '.')))
+			continue;
+
+		add_parent_ptr(p->inum, p->name.name, dp, dotdot_update);
 	}
 }
 
@@ -2905,7 +3020,7 @@ process_dir_inode(
 			 * inode but it's easier than wedging a
 			 * new define in ourselves.
 			 */
-			nres = no_modify ? 0 : XFS_REMOVE_SPACE_RES(mp);
+			nres = no_modify ? 0 : libxfs_remove_space_res(mp, 0);
 			error = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_remove,
 						    nres, 0, 0, &tp);
 			if (error)
@@ -2935,6 +3050,7 @@ _("error %d fixing shortform directory %llu\n"),
 		default:
 			break;
 	}
+	dir_hash_add_parent_ptrs(ip, hashtab);
 	dir_hash_done(hashtab);
 
 	/*
@@ -2952,7 +3068,7 @@ _("error %d fixing shortform directory %llu\n"),
 
 		do_warn(_("recreating root directory .. entry\n"));
 
-		nres = XFS_MKDIR_SPACE_RES(mp, 2);
+		nres = libxfs_mkdir_space_res(mp, 2);
 		error = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_mkdir,
 					    nres, 0, 0, &tp);
 		if (error)
@@ -3007,7 +3123,7 @@ _("error %d fixing shortform directory %llu\n"),
 			do_warn(
 	_("creating missing \".\" entry in dir ino %" PRIu64 "\n"), ino);
 
-			nres = XFS_MKDIR_SPACE_RES(mp, 1);
+			nres = libxfs_mkdir_space_res(mp, 1);
 			error = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_mkdir,
 						    nres, 0, 0, &tp);
 			if (error)
@@ -3226,6 +3342,8 @@ phase6(xfs_mount_t *mp)
 	ino_tree_node_t		*irec;
 	int			i;
 
+	parent_ptr_init(mp);
+
 	memset(&zerocr, 0, sizeof(struct cred));
 	memset(&zerofsx, 0, sizeof(struct fsxattr));
 	orphanage_ino = 0;
@@ -3326,4 +3444,8 @@ _("        - resetting contents of realtime bitmap and summary inodes\n"));
 			irec = next_ino_rec(irec);
 		}
 	}
+
+	/* Check and repair directory parent pointers, if enabled. */
+	check_parent_ptrs(mp);
+	parent_ptr_free(mp);
 }

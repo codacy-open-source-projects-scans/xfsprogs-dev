@@ -268,6 +268,12 @@ static inline struct inode *VFS_I(struct xfs_inode *ip)
 	return &ip->i_vnode;
 }
 
+/* convert from const xfs inode to const vfs inode */
+static inline const struct inode *VFS_IC(const struct xfs_inode *ip)
+{
+	return &ip->i_vnode;
+}
+
 /* We only have i_size in the xfs inode in userspace */
 static inline loff_t i_size_read(struct inode *inode)
 {
@@ -309,6 +315,10 @@ static inline void inc_nlink(struct inode *inode)
 {
 	inode->i_nlink++;
 }
+static inline void drop_nlink(struct inode *inode)
+{
+	inode->i_nlink--;
+}
 
 static inline bool xfs_is_reflink_inode(struct xfs_inode *ip)
 {
@@ -323,6 +333,16 @@ static inline bool xfs_inode_has_bigtime(struct xfs_inode *ip)
 static inline bool xfs_inode_has_large_extent_counts(struct xfs_inode *ip)
 {
 	return ip->i_diflags2 & XFS_DIFLAG2_NREXT64;
+}
+
+
+/*
+ * Decide if this file is a realtime file whose data allocation unit is larger
+ * than a single filesystem block.
+ */
+static inline bool xfs_inode_has_bigrtalloc(struct xfs_inode *ip)
+{
+	return XFS_IS_REALTIME_INODE(ip) && ip->i_mount->m_sb.sb_rextsize > 1;
 }
 
 /* Always set the child's GID to this value, even if the parent is setgid. */
@@ -342,6 +362,8 @@ extern void	libxfs_trans_inode_alloc_buf (struct xfs_trans *,
 extern void	libxfs_trans_ichgtime(struct xfs_trans *,
 				struct xfs_inode *, int);
 extern int	libxfs_iflush_int (struct xfs_inode *, struct xfs_buf *);
+
+void libxfs_bumplink(struct xfs_trans *tp, struct xfs_inode *ip);
 
 /* Inode Cache Interfaces */
 extern int	libxfs_iget(struct xfs_mount *, struct xfs_trans *, xfs_ino_t,

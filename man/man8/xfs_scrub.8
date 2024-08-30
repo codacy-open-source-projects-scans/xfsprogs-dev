@@ -4,7 +4,7 @@ xfs_scrub \- check and repair the contents of a mounted XFS filesystem
 .SH SYNOPSIS
 .B xfs_scrub
 [
-.B \-abCemnTvx
+.B \-abCeMmnpTvx
 ]
 .I mount-point
 .br
@@ -79,12 +79,66 @@ behavior.
 .B \-k
 Do not call TRIM on the free space.
 .TP
+.BI \-M " real-mount-point"
+Open the this path for issuing scrub system calls to the kernel.
+The positional
+.I mount-point
+parameter will be used for displaying informational messages and logging.
+This parameter exists to enable process sandboxing for service mode.
+.TP
 .BI \-m " file"
 Search this file for mounted filesystems instead of /etc/mtab.
 .TP
 .B \-n
 Only check filesystem metadata.
 Do not repair or optimize anything.
+.HP
+.B \-o
+.I subopt\c
+[\c
+.B =\c
+.IR value ]
+.BR
+Override what the program might conclude about the filesystem
+if left to its own devices.
+.IP
+The
+.IR subopt ions
+supported are:
+.RS 1.0i
+.TP
+.B autofsck
+Decide the operating mode from the value of the
+.I autofsck
+filesystem property.
+See the
+.B filesystem properties
+section for more details.
+.TP
+.BI fstrim_pct= percentage
+To constrain the amount of time spent on fstrim activities during phase 8,
+this program tries to balance estimated runtime against completeness of the
+trim.
+In short, the program avoids small trim requests to save time.
+
+During phase 7, a log-scale histogram of free space extents is constructed.
+At the start of phase 8, a CDF is computed in decreasing order of extent
+length from the histogram buckets.
+A point corresponding to the fstrim percentage target is chosen from the CDF
+and mapped back to a histogram bucket.
+Free space extents at least as long as the bucket size are trimmed.
+Smaller extents are ignored.
+
+By default, the percentage threshold is 99%.
+.TP
+.BI iwarn
+Treat informational messages as warnings.
+This will result in a nonzero return code, and a higher logging level.
+.RE
+.TP
+.B \-p
+Only optimize filesystem metadata.
+If repairs are required, report them and exit.
 .TP
 .BI \-T
 Print timing and memory usage information for each phase.
@@ -146,6 +200,44 @@ Scheduling a quotacheck for the next mount.
 .PP
 If corrupt metadata is successfully repaired, this program will log that
 a repair has succeeded instead of a corruption report.
+.SH FILESYSTEM PROPERTIES
+System administrators can convey their preferences for scrubbing of a
+particular filesystem by setting the filesystem property
+.B autofsck
+via the
+.BR xfs_property (8)
+command on the filesystem.
+These preferences will be honored if the
+.B -o autofsck
+option is specified.
+
+Recognized values for the
+.B autofsck
+property are:
+.RS
+.TP
+.I none
+Do not scan the filesystem at all.
+.TP
+.I check
+Scan and report corruption and opportunities for optimization, but do not
+change anything.
+.TP
+.I optimize
+Scan the filesystem and optimize where possible.
+Report corruptions, but do not fix them.
+.TP
+.I repair
+Scan the filesystem, fix corruptions, and optimize where possible.
+.RE
+
+If the property is not set, the default is
+.I check
+if the filesystem has either reverse mapping btrees or parent pointers enabled,
+or
+.I none
+otherwise.
+
 .SH EXIT CODE
 The exit code returned by
 .B xfs_scrub

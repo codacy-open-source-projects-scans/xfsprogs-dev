@@ -31,6 +31,8 @@ xfs_report_geom(
 	int			bigtime_enabled;
 	int			inobtcount;
 	int			nrext64;
+	int			exchangerange;
+	int			parent;
 
 	isint = geo->logstart > 0;
 	lazycount = geo->flags & XFS_FSOP_GEOM_FLAGS_LAZYSB ? 1 : 0;
@@ -49,15 +51,18 @@ xfs_report_geom(
 	bigtime_enabled = geo->flags & XFS_FSOP_GEOM_FLAGS_BIGTIME ? 1 : 0;
 	inobtcount = geo->flags & XFS_FSOP_GEOM_FLAGS_INOBTCNT ? 1 : 0;
 	nrext64 = geo->flags & XFS_FSOP_GEOM_FLAGS_NREXT64 ? 1 : 0;
+	exchangerange = geo->flags & XFS_FSOP_GEOM_FLAGS_EXCHANGE_RANGE ? 1 : 0;
+	parent = geo->flags & XFS_FSOP_GEOM_FLAGS_PARENT ? 1 : 0;
 
 	printf(_(
 "meta-data=%-22s isize=%-6d agcount=%u, agsize=%u blks\n"
 "         =%-22s sectsz=%-5u attr=%u, projid32bit=%u\n"
 "         =%-22s crc=%-8u finobt=%u, sparse=%u, rmapbt=%u\n"
 "         =%-22s reflink=%-4u bigtime=%u inobtcount=%u nrext64=%u\n"
+"         =%-22s exchange=%-3u\n"
 "data     =%-22s bsize=%-6u blocks=%llu, imaxpct=%u\n"
 "         =%-22s sunit=%-6u swidth=%u blks\n"
-"naming   =version %-14u bsize=%-6u ascii-ci=%d, ftype=%d\n"
+"naming   =version %-14u bsize=%-6u ascii-ci=%d, ftype=%d, parent=%d\n"
 "log      =%-22s bsize=%-6d blocks=%u, version=%d\n"
 "         =%-22s sectsz=%-5u sunit=%d blks, lazy-count=%d\n"
 "realtime =%-22s extsz=%-6d blocks=%lld, rtextents=%lld\n"),
@@ -65,10 +70,11 @@ xfs_report_geom(
 		"", geo->sectsize, attrversion, projid32bit,
 		"", crcs_enabled, finobt_enabled, spinodes, rmapbt_enabled,
 		"", reflink_enabled, bigtime_enabled, inobtcount, nrext64,
+		"", exchangerange,
 		"", geo->blocksize, (unsigned long long)geo->datablocks,
 			geo->imaxpct,
 		"", geo->sunit, geo->swidth,
-		dirversion, geo->dirblocksize, cimode, ftype_enabled,
+		dirversion, geo->dirblocksize, cimode, ftype_enabled, parent,
 		isint ? _("internal log") : logname ? logname : _("external"),
 			geo->blocksize, geo->logblocks, logversion,
 		"", geo->logsectsize, geo->logsunit / geo->blocksize, lazycount,
@@ -102,6 +108,19 @@ xfrog_geometry(
 	return -errno;
 }
 
+/* Compute conversion factors of an xfs_fd structure. */
+static void
+xfd_compute_conversion_factors(
+	struct xfs_fd		*xfd)
+{
+	xfd->agblklog = log2_roundup(xfd->fsgeom.agblocks);
+	xfd->blocklog = highbit32(xfd->fsgeom.blocksize);
+	xfd->inodelog = highbit32(xfd->fsgeom.inodesize);
+	xfd->inopblog = xfd->blocklog - xfd->inodelog;
+	xfd->aginolog = xfd->agblklog + xfd->inopblog;
+	xfd->blkbb_log = xfd->blocklog - BBSHIFT;
+}
+
 /*
  * Prepare xfs_fd structure for future ioctl operations by computing the xfs
  * geometry for @xfd->fd.  Returns zero or a negative error code.
@@ -116,13 +135,21 @@ xfd_prepare_geometry(
 	if (ret)
 		return ret;
 
-	xfd->agblklog = log2_roundup(xfd->fsgeom.agblocks);
-	xfd->blocklog = highbit32(xfd->fsgeom.blocksize);
-	xfd->inodelog = highbit32(xfd->fsgeom.inodesize);
-	xfd->inopblog = xfd->blocklog - xfd->inodelog;
-	xfd->aginolog = xfd->agblklog + xfd->inopblog;
-	xfd->blkbb_log = xfd->blocklog - BBSHIFT;
+	xfd_compute_conversion_factors(xfd);
 	return 0;
+}
+
+/*
+ * Prepare xfs_fd structure for future ioctl operations by computing the xfs
+ * geometry for @xfd->fd.  Returns zero or a negative error code.
+ */
+void
+xfd_install_geometry(
+	struct xfs_fd		*xfd,
+	struct xfs_fsop_geom	*fsgeom)
+{
+	memcpy(&xfd->fsgeom, fsgeom, sizeof(*fsgeom));
+	xfd_compute_conversion_factors(xfd);
 }
 
 /* Open a file on an XFS filesystem.  Returns zero or a negative error code. */

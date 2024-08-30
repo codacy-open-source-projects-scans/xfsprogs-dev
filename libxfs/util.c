@@ -241,6 +241,24 @@ xfs_inode_propagate_flags(
 }
 
 /*
+ * Increment the link count on an inode & log the change.
+ */
+void
+libxfs_bumplink(
+	struct xfs_trans	*tp,
+	struct xfs_inode	*ip)
+{
+	struct inode		*inode = VFS_I(ip);
+
+	xfs_trans_ichgtime(tp, ip, XFS_ICHGTIME_CHG);
+
+	if (inode->i_nlink != XFS_NLINK_PINNED)
+		inc_nlink(inode);
+
+	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
+}
+
+/*
  * Initialise a newly allocated inode and return the in-core inode to the
  * caller locked exclusively.
  */
@@ -256,11 +274,12 @@ libxfs_init_new_inode(
 	struct fsxattr		*fsx,
 	struct xfs_inode	**ipp)
 {
+	struct xfs_mount	*mp = tp->t_mountp;
 	struct xfs_inode	*ip;
 	unsigned int		flags;
 	int			error;
 
-	error = libxfs_iget(tp->t_mountp, tp, ino, XFS_IGET_CREATE, &ip);
+	error = libxfs_iget(mp, tp, ino, XFS_IGET_CREATE, &ip);
 	if (error != 0)
 		return error;
 	ASSERT(ip != NULL);
@@ -320,6 +339,22 @@ libxfs_init_new_inode(
 		break;
 	default:
 		ASSERT(0);
+	}
+
+	/*
+	 * If we're going to set a parent pointer on this file, we need to
+	 * create an attr fork to receive that parent pointer.
+	 */
+	if (pip && xfs_has_parent(mp)) {
+		ip->i_forkoff = xfs_default_attroffset(ip) >> 3;
+		xfs_ifork_init_attr(ip, XFS_DINODE_FMT_EXTENTS, 0);
+
+		if (!xfs_has_attr(mp)) {
+			spin_lock(&mp->m_sb_lock);
+			xfs_add_attr(mp);
+			spin_unlock(&mp->m_sb_lock);
+			xfs_log_sb(tp);
+		}
 	}
 
 	/*
@@ -732,6 +767,12 @@ void xfs_fs_mark_sick(struct xfs_mount *mp, unsigned int mask) { }
 void xfs_agno_mark_sick(struct xfs_mount *mp, xfs_agnumber_t agno,
 		unsigned int mask) { }
 void xfs_ag_mark_sick(struct xfs_perag *pag, unsigned int mask) { }
+void xfs_ag_measure_sickness(struct xfs_perag *pag, unsigned int *sick,
+		unsigned int *checked)
+{
+	*sick = 0;
+	*checked = 0;
+}
 void xfs_bmap_mark_sick(struct xfs_inode *ip, int whichfork) { }
 void xfs_btree_mark_sick(struct xfs_btree_cur *cur) { }
 void xfs_dirattr_mark_sick(struct xfs_inode *ip, int whichfork) { }
