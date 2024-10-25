@@ -228,6 +228,7 @@ __XFS_UNSUPP_FEAT(ikeep)
 __XFS_UNSUPP_FEAT(swalloc)
 __XFS_UNSUPP_FEAT(small_inums)
 __XFS_UNSUPP_FEAT(readonly)
+__XFS_UNSUPP_FEAT(grpid)
 
 /* Operational mount state flags */
 #define XFS_OPSTATE_INODE32		0	/* inode32 allocator active */
@@ -297,7 +298,8 @@ struct xfs_defer_drain { /* empty */ };
 #define xfs_defer_drain_init(dr)		((void)0)
 #define xfs_defer_drain_free(dr)		((void)0)
 
-#define xfs_perag_intent_get(mp, agno)		xfs_perag_get((mp), (agno))
+#define xfs_perag_intent_get(mp, agno) \
+	xfs_perag_get((mp), XFS_FSB_TO_AGNO((mp), (agno)))
 #define xfs_perag_intent_put(pag)		xfs_perag_put(pag)
 
 static inline void xfs_perag_intent_hold(struct xfs_perag *pag) {}
@@ -307,5 +309,12 @@ static inline void libxfs_buftarg_drain(struct xfs_buftarg *btp)
 {
 	cache_purge(btp->bcache);
 }
+
+struct mnt_idmap {
+	/* empty */
+};
+
+/* bogus idmapping so that mkfs can do directory inheritance correctly */
+#define libxfs_nop_idmap	((struct mnt_idmap *)1)
 
 #endif	/* __XFS_MOUNT_H__ */

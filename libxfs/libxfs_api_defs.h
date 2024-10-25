@@ -117,6 +117,7 @@
 #define xfs_da_shrink_inode		libxfs_da_shrink_inode
 #define xfs_defer_cancel		libxfs_defer_cancel
 #define xfs_defer_finish		libxfs_defer_finish
+#define xfs_dialloc			libxfs_dialloc
 #define xfs_dinode_calc_crc		libxfs_dinode_calc_crc
 #define xfs_dinode_good_version		libxfs_dinode_good_version
 #define xfs_dinode_verify		libxfs_dinode_verify
@@ -147,6 +148,7 @@
 #define xfs_dir2_shrink_inode		libxfs_dir2_shrink_inode
 
 #define xfs_dir_createname		libxfs_dir_createname
+#define xfs_dir_create_child		libxfs_dir_create_child
 #define xfs_dir_init			libxfs_dir_init
 #define xfs_dir_ino_validate		libxfs_dir_ino_validate
 #define xfs_dir_lookup			libxfs_dir_lookup
@@ -166,6 +168,7 @@
 #define xfs_free_extent_later		libxfs_free_extent_later
 #define xfs_free_perag			libxfs_free_perag
 #define xfs_fs_geometry			libxfs_fs_geometry
+#define xfs_get_initial_prid		libxfs_get_initial_prid
 #define xfs_highbit32			libxfs_highbit32
 #define xfs_highbit64			libxfs_highbit64
 #define xfs_ialloc_calc_rootino		libxfs_ialloc_calc_rootino
@@ -190,6 +193,7 @@
 #define xfs_inode_from_disk		libxfs_inode_from_disk
 #define xfs_inode_from_disk_ts		libxfs_inode_from_disk_ts
 #define xfs_inode_hasattr		libxfs_inode_hasattr
+#define xfs_inode_init			libxfs_inode_init
 #define xfs_inode_to_disk		libxfs_inode_to_disk
 #define xfs_inode_validate_cowextsize	libxfs_inode_validate_cowextsize
 #define xfs_inode_validate_extsize	libxfs_inode_validate_extsize
@@ -198,6 +202,7 @@
 
 #define xfs_iread_extents		libxfs_iread_extents
 #define xfs_irele			libxfs_irele
+#define xfs_iunlink			libxfs_iunlink
 #define xfs_link_space_res		libxfs_link_space_res
 #define xfs_log_calc_minimum_size	libxfs_log_calc_minimum_size
 #define xfs_log_get_max_trans_res	libxfs_log_get_max_trans_res

@@ -63,6 +63,9 @@
 #include "libfrog/crc32c.h"
 
 #include <sys/xattr.h>
+#ifdef HAVE_GETRANDOM_NONBLOCK
+#include <sys/random.h>
+#endif
 
 /* Zones used in libxfs allocations that aren't in shared header files */
 extern struct kmem_cache *xfs_buf_item_cache;
@@ -132,6 +135,7 @@ extern void cmn_err(int, char *, ...);
 enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
 
 #define xfs_info(mp,fmt,args...)	cmn_err(CE_CONT, _(fmt), ## args)
+#define xfs_info_ratelimited(mp,fmt,args...) cmn_err(CE_CONT, _(fmt), ## args)
 #define xfs_notice(mp,fmt,args...)	cmn_err(CE_NOTE, _(fmt), ## args)
 #define xfs_warn(mp,fmt,args...)	cmn_err((mp) ? CE_WARN : CE_WARN, _(fmt), ## args)
 #define xfs_err(mp,fmt,args...)		cmn_err(CE_ALERT, _(fmt), ## args)
@@ -212,11 +216,11 @@ static inline bool WARN_ON(bool expr) {
 #define percpu_counter_read_positive(x)	((*x) > 0 ? (*x) : 0)
 #define percpu_counter_sum_positive(x)	((*x) > 0 ? (*x) : 0)
 
-/*
- * get_random_u32 is used for di_gen inode allocation, it must be zero for
- * libxfs or all sorts of badness can occur!
- */
+#ifdef HAVE_GETRANDOM_NONBLOCK
+uint32_t get_random_u32(void);
+#else
 #define get_random_u32()	(0)
+#endif
 
 #define PAGE_SIZE		getpagesize()
 
@@ -224,6 +228,12 @@ static inline bool WARN_ON(bool expr) {
 #define inode_set_iversion_queried(inode, version) do { \
 	(inode)->i_version = (version);	\
 } while (0)
+
+struct inode;
+struct mnt_idmap;
+
+void inode_init_owner(struct mnt_idmap *idmap, struct inode *inode,
+		      const struct inode *dir, umode_t mode);
 
 #define __must_check	__attribute__((__warn_unused_result__))
 
@@ -468,12 +478,12 @@ xfs_buf_readahead(
 
 #define xfs_rotorstep				1
 #define xfs_bmap_rtalloc(a)			(-ENOSYS)
-#define xfs_get_extsz_hint(ip)			(0)
-#define xfs_get_cowextsz_hint(ip)		(0)
 #define xfs_inode_is_filestream(ip)		(0)
 #define xfs_filestream_lookup_ag(ip)		(0)
 #define xfs_filestream_new_ag(ip,ag)		(0)
 #define xfs_filestream_select_ag(...)		(-ENOSYS)
+
+#define xfs_trans_inode_buf(tp, bp)		((void) 0)
 
 /* quota bits */
 #define xfs_trans_mod_dquot_byino(t,i,f,d)		({ \
@@ -640,5 +650,9 @@ int xfs_bmap_last_extent(struct xfs_trans *tp, struct xfs_inode *ip,
 #define lower_32_bits(n) ((uint32_t)((n) & 0xffffffff))
 
 #define cond_resched()	((void)0)
+
+/* xfs_linux.h */
+#define irix_sgid_inherit		(false)
+#define vfsgid_in_group_p(...)		(false)
 
 #endif	/* __LIBXFS_INTERNAL_XFS_H__ */

@@ -1,4 +1,4 @@
-AC_INIT([xfsprogs],[6.10.1],[linux-xfs@vger.kernel.org])
+AC_INIT([xfsprogs],[6.11.0],[linux-xfs@vger.kernel.org])
 AC_PREREQ([2.69])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_MACRO_DIR([m4])
@@ -151,8 +151,8 @@ AC_HAVE_MAP_SYNC
 AC_HAVE_DEVMAPPER
 AC_HAVE_MALLINFO
 AC_HAVE_MALLINFO2
-AC_PACKAGE_WANT_ATTRIBUTES_H
-AC_HAVE_LIBATTR
+AC_HAVE_MEMFD_CREATE
+AC_HAVE_GETRANDOM_NONBLOCK
 if test "$enable_scrub" = "yes"; then
         if test "$enable_libicu" = "yes" || test "$enable_libicu" = "probe"; then
                 AC_HAVE_LIBICU

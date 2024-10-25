@@ -7,9 +7,40 @@
 #ifndef __XFS_INODE_H__
 #define __XFS_INODE_H__
 
+/*
+ * Borrow the kernel's uid/gid types.  These are used by xfs_inode_util.h, so
+ * they must come first in the header file.
+ */
+
+typedef struct {
+	uid_t val;
+} kuid_t;
+
+typedef struct {
+	gid_t val;
+} kgid_t;
+
+static inline kuid_t make_kuid(uid_t uid)
+{
+	kuid_t	v = { .val = uid };
+	return v;
+}
+
+static inline kgid_t make_kgid(gid_t gid)
+{
+	kgid_t	v = { .val = gid };
+	return v;
+}
+
+#define KUIDT_INIT(value) (kuid_t){ value }
+#define KGIDT_INIT(value) (kgid_t){ value }
+#define GLOBAL_ROOT_UID KUIDT_INIT(0)
+#define GLOBAL_ROOT_GID KGIDT_INIT(0)
+
 /* These match kernel side includes */
 #include "xfs_inode_buf.h"
 #include "xfs_inode_fork.h"
+#include "xfs_inode_util.h"
 
 struct xfs_trans;
 struct xfs_mount;
@@ -33,8 +64,8 @@ static inline bool IS_I_VERSION(const struct inode *inode) { return false; }
  */
 struct inode {
 	mode_t			i_mode;
-	uint32_t		i_uid;
-	uint32_t		i_gid;
+	kuid_t			i_uid;
+	kgid_t			i_gid;
 	uint32_t		i_nlink;
 	xfs_dev_t		i_rdev;	 /* This actually holds xfs_dev_t */
 	unsigned int		i_count;
@@ -47,21 +78,39 @@ struct inode {
 	spinlock_t		i_lock;
 };
 
+static inline void
+inode_set_iversion(struct inode *inode, uint64_t version)
+{
+	inode->i_version = version;
+}
+
 static inline uint32_t i_uid_read(struct inode *inode)
 {
-	return inode->i_uid;
+	return inode->i_uid.val;
 }
 static inline uint32_t i_gid_read(struct inode *inode)
 {
-	return inode->i_gid;
+	return inode->i_gid.val;
 }
-static inline void i_uid_write(struct inode *inode, uint32_t uid)
+static inline void i_uid_write(struct inode *inode, uid_t uid)
 {
-	inode->i_uid = uid;
+	inode->i_uid.val = uid;
 }
-static inline void i_gid_write(struct inode *inode, uint32_t gid)
+static inline void i_gid_write(struct inode *inode, gid_t gid)
 {
-	inode->i_gid = gid;
+	inode->i_gid.val = gid;
+}
+
+static inline void inode_fsuid_set(struct inode *inode,
+				   struct mnt_idmap *idmap)
+{
+	inode->i_uid = make_kuid(0);
+}
+
+static inline void inode_fsgid_set(struct inode *inode,
+				   struct mnt_idmap *idmap)
+{
+	inode->i_gid = make_kgid(0);
 }
 
 static inline void ihold(struct inode *inode)
@@ -188,6 +237,7 @@ typedef struct xfs_inode {
 
 	/* unlinked list pointers */
 	xfs_agino_t		i_next_unlinked;
+	xfs_agino_t		i_prev_unlinked;
 
 	xfs_extnum_t		i_cnextents;	/* # of extents in cow fork */
 	unsigned int		i_cformat;	/* format of cow fork */
@@ -345,17 +395,11 @@ static inline bool xfs_inode_has_bigrtalloc(struct xfs_inode *ip)
 	return XFS_IS_REALTIME_INODE(ip) && ip->i_mount->m_sb.sb_rextsize > 1;
 }
 
-/* Always set the child's GID to this value, even if the parent is setgid. */
-#define CRED_FORCE_GID	(1U << 0)
-struct cred {
-	uid_t		cr_uid;
-	gid_t		cr_gid;
-	unsigned int	cr_flags;
-};
+static inline bool xfs_is_always_cow_inode(struct xfs_inode *ip)
+{
+	return false;
+}
 
-extern int	libxfs_dir_ialloc (struct xfs_trans **, struct xfs_inode *,
-				mode_t, nlink_t, xfs_dev_t, struct cred *,
-				struct fsxattr *, struct xfs_inode **);
 extern void	libxfs_trans_inode_alloc_buf (struct xfs_trans *,
 				struct xfs_buf *);
 
@@ -363,11 +407,22 @@ extern void	libxfs_trans_ichgtime(struct xfs_trans *,
 				struct xfs_inode *, int);
 extern int	libxfs_iflush_int (struct xfs_inode *, struct xfs_buf *);
 
-void libxfs_bumplink(struct xfs_trans *tp, struct xfs_inode *ip);
+int libxfs_icreate(struct xfs_trans *tp, xfs_ino_t ino,
+		const struct xfs_icreate_args *args, struct xfs_inode **ipp);
 
 /* Inode Cache Interfaces */
 extern int	libxfs_iget(struct xfs_mount *, struct xfs_trans *, xfs_ino_t,
 				uint, struct xfs_inode **);
 extern void	libxfs_irele(struct xfs_inode *ip);
+
+#define XFS_DEFAULT_COWEXTSZ_HINT	32
+
+#define XFS_INHERIT_GID(pip)		(VFS_I(pip)->i_mode & S_ISGID)
+
+#define xfs_inherit_noatime		(false)
+#define xfs_inherit_nodump		(false)
+#define xfs_inherit_sync		(false)
+#define xfs_inherit_nosymlinks		(false)
+#define xfs_inherit_nodefrag		(false)
 
 #endif /* __XFS_INODE_H__ */

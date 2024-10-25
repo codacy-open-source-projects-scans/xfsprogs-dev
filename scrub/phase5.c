@@ -8,9 +8,6 @@
 #include <dirent.h>
 #include <sys/types.h>
 #include <sys/statvfs.h>
-#ifdef HAVE_LIBATTR
-# include <attr/attributes.h>
-#endif
 #include <linux/fs.h>
 #include "handle.h"
 #include "list.h"
@@ -20,6 +17,7 @@
 #include "libfrog/scrub.h"
 #include "libfrog/bitmap.h"
 #include "libfrog/bulkstat.h"
+#include "libfrog/fakelibattr.h"
 #include "xfs_scrub.h"
 #include "common.h"
 #include "inodes.h"
@@ -164,7 +162,6 @@ out_unicrash:
 	return ret;
 }
 
-#ifdef HAVE_LIBATTR
 /* Routines to scan all of an inode's xattrs for name problems. */
 struct attrns_decode {
 	int			flags;
@@ -173,8 +170,8 @@ struct attrns_decode {
 
 static const struct attrns_decode attr_ns[] = {
 	{0,			"user"},
-	{ATTR_ROOT,		"system"},
-	{ATTR_SECURE,		"secure"},
+	{XFS_IOC_ATTR_ROOT,	"system"},
+	{XFS_IOC_ATTR_SECURE,	"secure"},
 	{0, NULL},
 };
 
@@ -190,30 +187,41 @@ check_xattr_ns_names(
 	struct xfs_bulkstat		*bstat,
 	const struct attrns_decode	*attr_ns)
 {
-	struct attrlist_cursor		cur;
-	char				attrbuf[XFS_XATTR_LIST_MAX];
-	char				keybuf[XATTR_NAME_MAX + 1];
-	struct attrlist			*attrlist = (struct attrlist *)attrbuf;
-	struct attrlist_ent		*ent;
+	struct xfs_attrlist_cursor	cur = { };
+	char				*keybuf;
+	struct xfs_attrlist		*attrlist;
 	struct unicrash			*uc = NULL;
 	int				i;
 	int				error;
 
-	error = unicrash_xattr_init(&uc, ctx, bstat);
-	if (error) {
-		str_liberror(ctx, error, descr_render(dsc));
+	attrlist = calloc(XFS_XATTR_LIST_MAX, 1);
+	if (!attrlist) {
+		error = errno;
+		str_errno(ctx, descr_render(dsc));
 		return error;
 	}
 
-	memset(attrbuf, 0, XFS_XATTR_LIST_MAX);
-	memset(&cur, 0, sizeof(cur));
-	memset(keybuf, 0, XATTR_NAME_MAX + 1);
-	error = attr_list_by_handle(handle, sizeof(*handle), attrbuf,
-			XFS_XATTR_LIST_MAX, attr_ns->flags, &cur);
-	while (!error) {
+	keybuf = calloc(XATTR_NAME_MAX + 1, 1);
+	if (!keybuf) {
+		error = errno;
+		str_errno(ctx, descr_render(dsc));
+		goto out_attrlist;
+	}
+
+	error = unicrash_xattr_init(&uc, ctx, bstat);
+	if (error) {
+		str_liberror(ctx, error, descr_render(dsc));
+		goto out_keybuf;
+	}
+
+	while ((error = libfrog_attr_list_by_handle(handle, sizeof(*handle),
+				attrlist, XFS_XATTR_LIST_MAX, attr_ns->flags,
+				&cur)) == 0) {
 		/* Examine the xattrs. */
 		for (i = 0; i < attrlist->al_count; i++) {
-			ent = ATTR_ENTRY(attrlist, i);
+			struct xfs_attrlist_ent	*ent =
+					libfrog_attr_entry(attrlist, i);
+
 			snprintf(keybuf, XATTR_NAME_MAX, "%s.%s", attr_ns->name,
 					ent->a_name);
 			if (uc)
@@ -225,14 +233,12 @@ check_xattr_ns_names(
 						keybuf);
 			if (error) {
 				str_liberror(ctx, error, descr_render(dsc));
-				goto out;
+				goto out_uc;
 			}
 		}
 
 		if (!attrlist->al_more)
 			break;
-		error = attr_list_by_handle(handle, sizeof(*handle), attrbuf,
-				XFS_XATTR_LIST_MAX, attr_ns->flags, &cur);
 	}
 	if (error) {
 		if (errno == ESTALE)
@@ -241,8 +247,12 @@ check_xattr_ns_names(
 		if (errno)
 			str_errno(ctx, descr_render(dsc));
 	}
-out:
+out_uc:
 	unicrash_free(uc);
+out_keybuf:
+	free(keybuf);
+out_attrlist:
+	free(attrlist);
 	return error;
 }
 
@@ -267,9 +277,6 @@ check_xattr_names(
 	}
 	return ret;
 }
-#else
-# define check_xattr_names(c, d, h, b)	(0)
-#endif /* HAVE_LIBATTR */
 
 static int
 render_ino_from_handle(

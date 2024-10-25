@@ -25,6 +25,7 @@ HFILES = \
 	libxfs_api_defs.h \
 	listxattr.h \
 	init.h \
+	iunlink.h \
 	libxfs_priv.h \
 	linux-err.h \
 	topology.h \
@@ -52,6 +53,7 @@ HFILES = \
 	xfs_ialloc_btree.h \
 	xfs_inode_buf.h \
 	xfs_inode_fork.h \
+	xfs_inode_util.h \
 	xfs_parent.h \
 	xfs_quota_defs.h \
 	xfs_refcount.h \
@@ -69,6 +71,8 @@ CFILES = buf_mem.c \
 	cache.c \
 	defer_item.c \
 	init.c \
+	inode.c \
+	iunlink.c \
 	kmem.c \
 	listxattr.c \
 	logitem.c \
@@ -105,6 +109,7 @@ CFILES = buf_mem.c \
 	xfs_iext_tree.c \
 	xfs_inode_buf.c \
 	xfs_inode_fork.c \
+	xfs_inode_util.c \
 	xfs_ialloc_btree.c \
 	xfs_log_rlimit.c \
 	xfs_parent.c \
@@ -127,6 +132,14 @@ CFILES = buf_mem.c \
 # -DXACT_DEBUG		transaction state changes
 #
 #LCFLAGS +=
+
+ifeq ($(HAVE_MEMFD_CREATE),yes)
+LCFLAGS += -DHAVE_MEMFD_CREATE
+endif
+
+ifeq ($(HAVE_GETRANDOM_NONBLOCK),yes)
+LCFLAGS += -DHAVE_GETRANDOM_NONBLOCK
+endif
 
 FCFLAGS = -I.
 

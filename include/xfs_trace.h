@@ -14,7 +14,7 @@
 #define trace_xfbtree_trans_commit_buf(...)	((void) 0)
 
 #define trace_xfs_agfl_reset(a,b,c,d)		((void) 0)
-#define trace_xfs_agfl_free_defer(a,b,c,d,e)	((void) 0)
+#define trace_xfs_agfl_free_defer(...)		((void) 0)
 #define trace_xfs_alloc_cur_check(...)		((void) 0)
 #define trace_xfs_alloc_cur(a)			((void) 0)
 #define trace_xfs_alloc_cur_left(a)		((void) 0)
@@ -243,8 +243,7 @@
 #define trace_xfs_defer_item_pause(...)		((void) 0)
 #define trace_xfs_defer_item_unpause(...)	((void) 0)
 
-#define trace_xfs_bmap_free_defer(...)		((void) 0)
-#define trace_xfs_bmap_free_deferred(...)	((void) 0)
+#define trace_xfs_extent_free_defer(...)	((void) 0)
 
 #define trace_xfs_rmap_map(...)			((void) 0)
 #define trace_xfs_rmap_map_error(...)		((void) 0)
@@ -360,5 +359,11 @@
 #define trace_xfs_fs_mark_healthy(a,b)		((void) 0)
 
 #define trace_xlog_intent_recovery_failed(...)	((void) 0)
+
+#define trace_xfs_iunlink_update_bucket(...)	((void) 0)
+#define trace_xfs_iunlink_update_dinode(...)	((void) 0)
+#define trace_xfs_iunlink(...)			((void) 0)
+#define trace_xfs_iunlink_reload_next(...)	((void) 0)
+#define trace_xfs_iunlink_remove(...)		((void) 0)
 
 #endif /* __TRACE_H__ */

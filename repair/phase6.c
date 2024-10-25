@@ -20,8 +20,6 @@
 #include "versions.h"
 #include "repair/pptr.h"
 
-static struct cred		zerocr;
-static struct fsxattr 		zerofsx;
 static xfs_ino_t		orphanage_ino;
 
 /*
@@ -449,20 +447,31 @@ res_failed(
 		do_error(_("xfs_trans_reserve returned %d\n"), err);
 }
 
-static inline void
-reset_inode_fields(struct xfs_inode *ip)
+/*
+ * Forcibly reinitialize a file that is a child of the superblock and has a
+ * statically defined inumber.  These files are the root of a directory tree or
+ * the realtime free space inodes.  The inode must not otherwise be in use; the
+ * data fork must be empty, and the attr fork will be reset.
+ */
+static void
+reset_sbroot_ino(
+	struct xfs_trans	*tp,
+	umode_t			mode,
+	struct xfs_inode	*ip)
 {
-	ip->i_projid = 0;
-	ip->i_disk_size = 0;
-	ip->i_nblocks = 0;
-	ip->i_extsize = 0;
-	ip->i_cowextsize = 0;
-	ip->i_flushiter = 0;
+	struct xfs_icreate_args	args = {
+		.idmap		= libxfs_nop_idmap,
+		.mode		= mode,
+		/* Root directories cannot be linked to a parent. */
+		.flags		= XFS_ICREATE_UNLINKABLE,
+	};
+
+	/* Erase the attr fork since libxfs_inode_init won't do it for us. */
 	ip->i_forkoff = 0;
-	ip->i_diflags = 0;
-	ip->i_diflags2 = 0;
-	ip->i_crtime.tv_sec = 0;
-	ip->i_crtime.tv_nsec = 0;
+	libxfs_ifork_zap_attr(ip);
+
+	libxfs_trans_ijoin(tp, ip, 0);
+	libxfs_inode_init(tp, &args, ip);
 }
 
 static void
@@ -476,7 +485,6 @@ mk_rbmino(xfs_mount_t *mp)
 	int		error;
 	xfs_fileoff_t	bno;
 	xfs_bmbt_irec_t	map[XFS_BMAP_MAX_NMAP];
-	int		times;
 	uint		blocks;
 
 	/*
@@ -493,34 +501,9 @@ mk_rbmino(xfs_mount_t *mp)
 			error);
 	}
 
-	reset_inode_fields(ip);
-
-	VFS_I(ip)->i_mode = S_IFREG;
-	ip->i_df.if_format = XFS_DINODE_FMT_EXTENTS;
-	libxfs_ifork_zap_attr(ip);
-
-	set_nlink(VFS_I(ip), 1);	/* account for sb ptr */
-
-	times = XFS_ICHGTIME_CHG | XFS_ICHGTIME_MOD;
-	if (xfs_has_v3inodes(mp)) {
-		VFS_I(ip)->i_version = 1;
-		ip->i_diflags2 = 0;
-		times |= XFS_ICHGTIME_CREATE;
-	}
-	libxfs_trans_ichgtime(tp, ip, times);
-
-	/*
-	 * now the ifork
-	 */
-	ip->i_df.if_bytes = 0;
-	ip->i_df.if_data = NULL;
-
+	/* Reset the realtime bitmap inode. */
+	reset_sbroot_ino(tp, S_IFREG, ip);
 	ip->i_disk_size = mp->m_sb.sb_rbmblocks * mp->m_sb.sb_blocksize;
-
-	/*
-	 * commit changes
-	 */
-	libxfs_trans_ijoin(tp, ip, 0);
 	libxfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	error = -libxfs_trans_commit(tp);
 	if (error)
@@ -731,7 +714,6 @@ mk_rsumino(xfs_mount_t *mp)
 	int		nsumblocks;
 	xfs_fileoff_t	bno;
 	xfs_bmbt_irec_t	map[XFS_BMAP_MAX_NMAP];
-	int		times;
 	uint		blocks;
 
 	/*
@@ -748,34 +730,9 @@ mk_rsumino(xfs_mount_t *mp)
 			error);
 	}
 
-	reset_inode_fields(ip);
-
-	VFS_I(ip)->i_mode = S_IFREG;
-	ip->i_df.if_format = XFS_DINODE_FMT_EXTENTS;
-	libxfs_ifork_zap_attr(ip);
-
-	set_nlink(VFS_I(ip), 1);	/* account for sb ptr */
-
-	times = XFS_ICHGTIME_CHG | XFS_ICHGTIME_MOD;
-	if (xfs_has_v3inodes(mp)) {
-		VFS_I(ip)->i_version = 1;
-		ip->i_diflags2 = 0;
-		times |= XFS_ICHGTIME_CREATE;
-	}
-	libxfs_trans_ichgtime(tp, ip, times);
-
-	/*
-	 * now the ifork
-	 */
-	ip->i_df.if_bytes = 0;
-	ip->i_df.if_data = NULL;
-
+	/* Reset the rt summary inode. */
+	reset_sbroot_ino(tp, S_IFREG, ip);
 	ip->i_disk_size = mp->m_rsumsize;
-
-	/*
-	 * commit changes
-	 */
-	libxfs_trans_ijoin(tp, ip, 0);
 	libxfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	error = -libxfs_trans_commit(tp);
 	if (error)
@@ -831,7 +788,6 @@ mk_root_dir(xfs_mount_t *mp)
 	int		error;
 	const mode_t	mode = 0755;
 	ino_tree_node_t	*irec;
-	int		times;
 
 	ip = NULL;
 	i = -libxfs_trans_alloc(mp, &M_RES(mp)->tr_ichange, 10, 0, 0, &tp);
@@ -843,36 +799,8 @@ mk_root_dir(xfs_mount_t *mp)
 		do_error(_("could not iget root inode -- error - %d\n"), error);
 	}
 
-	/*
-	 * take care of the core -- initialization from xfs_ialloc()
-	 */
-	reset_inode_fields(ip);
-
-	VFS_I(ip)->i_mode = mode|S_IFDIR;
-	ip->i_df.if_format = XFS_DINODE_FMT_EXTENTS;
-	libxfs_ifork_zap_attr(ip);
-
-	set_nlink(VFS_I(ip), 2);	/* account for . and .. */
-
-	times = XFS_ICHGTIME_CHG | XFS_ICHGTIME_MOD;
-	if (xfs_has_v3inodes(mp)) {
-		VFS_I(ip)->i_version = 1;
-		ip->i_diflags2 = 0;
-		times |= XFS_ICHGTIME_CREATE;
-	}
-	libxfs_trans_ichgtime(tp, ip, times);
-	libxfs_trans_ijoin(tp, ip, 0);
-	libxfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
-
-	/*
-	 * now the ifork
-	 */
-	ip->i_df.if_bytes = 0;
-	ip->i_df.if_data = NULL;
-
-	/*
-	 * initialize the directory
-	 */
+	/* Reset the root directory. */
+	reset_sbroot_ino(tp, mode | S_IFDIR, ip);
 	libxfs_dir_init(tp, ip, ip);
 
 	error = -libxfs_trans_commit(tp);
@@ -891,22 +819,30 @@ mk_root_dir(xfs_mount_t *mp)
  * orphanage name == lost+found
  */
 static xfs_ino_t
-mk_orphanage(xfs_mount_t *mp)
+mk_orphanage(
+	struct xfs_mount	*mp)
 {
-	xfs_ino_t	ino;
-	xfs_trans_t	*tp;
-	xfs_inode_t	*ip;
-	xfs_inode_t	*pip;
-	ino_tree_node_t	*irec;
-	int		ino_offset = 0;
-	int		i;
-	int		error;
-	const int	mode = 0755;
-	int		nres;
-	struct xfs_name	xname;
-	struct xfs_parent_args *ppargs = NULL;
+	struct xfs_icreate_args	args = {
+		.idmap		= libxfs_nop_idmap,
+		.mode		= S_IFDIR | 0755,
+	};
+	struct xfs_name		xname = {
+		.name		= (unsigned char *)ORPHANAGE,
+		.len		= strlen(ORPHANAGE),
+		.type		= XFS_DIR3_FT_DIR,
+	};
+	struct xfs_dir_update	du = {
+		.name		= &xname,
+	};
+	struct xfs_trans	*tp;
+	struct ino_tree_node	*irec;
+	xfs_ino_t		ino;
+	int			ino_offset = 0;
+	int			i;
+	int			error;
+	int			nres;
 
-	i = -libxfs_parent_start(mp, &ppargs);
+	i = -libxfs_parent_start(mp, &du.ppargs);
 	if (i)
 		do_error(_("%d - couldn't allocate parent pointer for %s\n"),
 			i, ORPHANAGE);
@@ -917,17 +853,15 @@ mk_orphanage(xfs_mount_t *mp)
 	 * would have been cleared in phase3 and phase4.
 	 */
 
-	i = -libxfs_iget(mp, NULL, mp->m_sb.sb_rootino, 0, &pip);
+	i = -libxfs_iget(mp, NULL, mp->m_sb.sb_rootino, 0, &du.dp);
 	if (i)
 		do_error(_("%d - couldn't iget root inode to obtain %s\n"),
 			i, ORPHANAGE);
 
-	xname.name = (unsigned char *)ORPHANAGE;
-	xname.len = strlen(ORPHANAGE);
-	xname.type = XFS_DIR3_FT_DIR;
+	args.pip = du.dp;
 
 	/* If the lookup of /lost+found succeeds, return the inumber. */
-	error = -libxfs_dir_lookup(NULL, pip, &xname, &ino, NULL);
+	error = -libxfs_dir_lookup(NULL, du.dp, &xname, &ino, NULL);
 	if (error == 0)
 		goto out_pip;
 
@@ -939,23 +873,15 @@ mk_orphanage(xfs_mount_t *mp)
 	if (i)
 		res_failed(i);
 
-	/*
-	 * use iget/ijoin instead of trans_iget because the ialloc
-	 * wrapper can commit the transaction and start a new one
-	 */
-/*	i = -libxfs_iget(mp, NULL, mp->m_sb.sb_rootino, 0, &pip);
-	if (i)
-		do_error(_("%d - couldn't iget root inode to make %s\n"),
-			i, ORPHANAGE);*/
-
-	error = -libxfs_dir_ialloc(&tp, pip, mode|S_IFDIR,
-					1, 0, &zerocr, &zerofsx, &ip);
-	if (error) {
+	error = -libxfs_dialloc(&tp, mp->m_sb.sb_rootino, args.mode, &ino);
+	if (error)
 		do_error(_("%s inode allocation failed %d\n"),
 			ORPHANAGE, error);
-	}
-	libxfs_bumplink(tp, ip);		/* account for . */
-	ino = ip->i_ino;
+
+	error = -libxfs_icreate(tp, ino, &args, &du.ip);
+	if (error)
+		do_error(_("%s inode initialization failed %d\n"),
+			ORPHANAGE, error);
 
 	irec = find_inode_rec(mp,
 			XFS_INO_TO_AGNO(mp, ino),
@@ -990,49 +916,37 @@ mk_orphanage(xfs_mount_t *mp)
 	 * now that we know the transaction will stay around,
 	 * add the root inode to it
 	 */
-	libxfs_trans_ijoin(tp, pip, 0);
+	libxfs_trans_ijoin(tp, du.dp, 0);
 
 	/*
 	 * create the actual entry
 	 */
-	error = -libxfs_dir_createname(tp, pip, &xname, ip->i_ino, nres);
+	error = -libxfs_dir_create_child(tp, nres, &du);
 	if (error)
 		do_error(
 		_("can't make %s, createname error %d\n"),
 			ORPHANAGE, error);
-	add_parent_ptr(ip->i_ino, (unsigned char *)ORPHANAGE, pip, false);
-
-	if (ppargs) {
-		error = -libxfs_parent_addname(tp, ppargs, pip, &xname, ip);
-		if (error)
-			do_error(
- _("can't make %s, parent addname error %d\n"),
-					ORPHANAGE, error);
-	}
+	add_parent_ptr(du.ip->i_ino, (unsigned char *)ORPHANAGE, du.dp, false);
 
 	/*
-	 * bump up the link count in the root directory to account
-	 * for .. in the new directory, and update the irec copy of the
+	 * We bumped up the link count in the root directory to account
+	 * for .. in the new directory, so now update the irec copy of the
 	 * on-disk nlink so we don't fail the link count check later.
 	 */
-	libxfs_bumplink(tp, pip);
 	irec = find_inode_rec(mp, XFS_INO_TO_AGNO(mp, mp->m_sb.sb_rootino),
 				  XFS_INO_TO_AGINO(mp, mp->m_sb.sb_rootino));
 	add_inode_ref(irec, 0);
 	set_inode_disk_nlinks(irec, 0, get_inode_disk_nlinks(irec, 0) + 1);
 
-	libxfs_trans_log_inode(tp, pip, XFS_ILOG_CORE);
-	libxfs_dir_init(tp, ip, pip);
-	libxfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	error = -libxfs_trans_commit(tp);
 	if (error) {
 		do_error(_("%s directory creation failed -- bmapf error %d\n"),
 			ORPHANAGE, error);
 	}
-	libxfs_irele(ip);
+	libxfs_irele(du.ip);
 out_pip:
-	libxfs_irele(pip);
-	libxfs_parent_finish(mp, ppargs);
+	libxfs_irele(du.dp);
+	libxfs_parent_finish(mp, du.ppargs);
 
 	return(ino);
 }
@@ -3344,8 +3258,6 @@ phase6(xfs_mount_t *mp)
 
 	parent_ptr_init(mp);
 
-	memset(&zerocr, 0, sizeof(struct cred));
-	memset(&zerofsx, 0, sizeof(struct fsxattr));
 	orphanage_ino = 0;
 
 	do_log(_("Phase 6 - check inode connectivity...\n"));
