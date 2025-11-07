@@ -38,6 +38,9 @@ pread_help(void)
 " -Z N -- zeed the random number generator (used when reading randomly)\n"
 "         (heh, zorry, the -s/-S arguments were already in use in pwrite)\n"
 " -V N -- use vectored IO with N iovecs of blocksize each (preadv)\n"
+#ifdef HAVE_PREADV2
+" -U   -- Perform the preadv2() with RWF_DONTCACHE\n"
+#endif
 "\n"
 " When in \"random\" mode, the number of read operations will equal the\n"
 " number required to do a complete forward/backward scan of the range.\n"
@@ -162,7 +165,8 @@ static ssize_t
 do_preadv(
 	int		fd,
 	off_t		offset,
-	long long	count)
+	long long	count,
+	int			preadv2_flags)
 {
 	int		vecs = 0;
 	ssize_t		oldlen = 0;
@@ -181,8 +185,14 @@ do_preadv(
 	} else {
 		vecs = vectors;
 	}
+#ifdef HAVE_PREADV2
+	if (preadv2_flags)
+		bytes = preadv2(fd, iov, vectors, offset, preadv2_flags);
+	else
+		bytes = preadv(fd, iov, vectors, offset);
+#else
 	bytes = preadv(fd, iov, vectors, offset);
-
+#endif
 	/* restore trimmed iov */
 	if (oldlen)
 		iov[vecs - 1].iov_len = oldlen;
@@ -195,12 +205,13 @@ do_pread(
 	int		fd,
 	off_t		offset,
 	long long	count,
-	size_t		buffer_size)
+	size_t		buffer_size,
+	int			preadv2_flags)
 {
 	if (!vectors)
 		return pread(fd, io_buffer, min(count, buffer_size), offset);
 
-	return do_preadv(fd, offset, count);
+	return do_preadv(fd, offset, count, preadv2_flags);
 }
 
 static int
@@ -210,7 +221,8 @@ read_random(
 	long long	count,
 	long long	*total,
 	unsigned int	seed,
-	int		eof)
+	int		eof,
+	int		preadv2_flags)
 {
 	off_t		end, off, range;
 	ssize_t		bytes;
@@ -234,7 +246,7 @@ read_random(
 				io_buffersize;
 		else
 			off = offset;
-		bytes = do_pread(fd, off, io_buffersize, io_buffersize);
+		bytes = do_pread(fd, off, io_buffersize, io_buffersize, preadv2_flags);
 		if (bytes == 0)
 			break;
 		if (bytes < 0) {
@@ -256,7 +268,8 @@ read_backward(
 	off_t		*offset,
 	long long	*count,
 	long long	*total,
-	int		eof)
+	int		eof,
+	int		preadv2_flags)
 {
 	off_t		end, off = *offset;
 	ssize_t		bytes = 0, bytes_requested;
@@ -276,7 +289,7 @@ read_backward(
 	/* Do initial unaligned read if needed */
 	if ((bytes_requested = (off % io_buffersize))) {
 		off -= bytes_requested;
-		bytes = do_pread(fd, off, bytes_requested, io_buffersize);
+		bytes = do_pread(fd, off, bytes_requested, io_buffersize, preadv2_flags);
 		if (bytes == 0)
 			return ops;
 		if (bytes < 0) {
@@ -294,7 +307,7 @@ read_backward(
 	while (cnt > end) {
 		bytes_requested = min(cnt, io_buffersize);
 		off -= bytes_requested;
-		bytes = do_pread(fd, off, cnt, io_buffersize);
+		bytes = do_pread(fd, off, cnt, io_buffersize, preadv2_flags);
 		if (bytes == 0)
 			break;
 		if (bytes < 0) {
@@ -318,14 +331,15 @@ read_forward(
 	long long	*total,
 	int		verbose,
 	int		onlyone,
-	int		eof)
+	int		eof,
+	int		preadv2_flags)
 {
 	ssize_t		bytes;
 	int		ops = 0;
 
 	*total = 0;
 	while (count > 0 || eof) {
-		bytes = do_pread(fd, offset, count, io_buffersize);
+		bytes = do_pread(fd, offset, count, io_buffersize, preadv2_flags);
 		if (bytes == 0)
 			break;
 		if (bytes < 0) {
@@ -353,7 +367,7 @@ read_buffer(
 	int		verbose,
 	int		onlyone)
 {
-	return read_forward(fd, offset, count, total, verbose, onlyone, 0);
+	return read_forward(fd, offset, count, total, verbose, onlyone, 0, 0);
 }
 
 static int
@@ -371,12 +385,13 @@ pread_f(
 	int		Cflag, qflag, uflag, vflag;
 	int		eof = 0, direction = IO_FORWARD;
 	int		c;
+	int		preadv2_flags = 0;
 
 	Cflag = qflag = uflag = vflag = 0;
 	init_cvtnum(&fsblocksize, &fssectsize);
 	bsize = fsblocksize;
 
-	while ((c = getopt(argc, argv, "b:BCFRquvV:Z:")) != EOF) {
+	while ((c = getopt(argc, argv, "b:BCFRquUvV:Z:")) != EOF) {
 		switch (c) {
 		case 'b':
 			tmp = cvtnum(fsblocksize, fssectsize, optarg);
@@ -405,6 +420,11 @@ pread_f(
 		case 'u':
 			uflag = 1;
 			break;
+#ifdef HAVE_PREADV2
+		case 'U':
+			preadv2_flags |= RWF_DONTCACHE;
+			break;
+#endif
 		case 'v':
 			vflag = 1;
 			break;
@@ -431,6 +451,11 @@ pread_f(
 		}
 	}
 	if (optind != argc - 2) {
+		exitcode = 1;
+		return command_usage(&pread_cmd);
+	}
+	if (preadv2_flags != 0 && vectors == 0) {
+		printf(_("preadv2 flags require vectored I/O (-V)\n"));
 		exitcode = 1;
 		return command_usage(&pread_cmd);
 	}
@@ -463,15 +488,18 @@ pread_f(
 	case IO_RANDOM:
 		if (!zeed)	/* srandom seed */
 			zeed = time(NULL);
-		c = read_random(file->fd, offset, count, &total, zeed, eof);
+		c = read_random(file->fd, offset, count, &total, zeed, eof,
+						preadv2_flags);
 		break;
 	case IO_FORWARD:
-		c = read_forward(file->fd, offset, count, &total, vflag, 0, eof);
+		c = read_forward(file->fd, offset, count, &total, vflag, 0, eof,
+						 preadv2_flags);
 		if (eof)
 			count = total;
 		break;
 	case IO_BACKWARD:
-		c = read_backward(file->fd, &offset, &count, &total, eof);
+		c = read_backward(file->fd, &offset, &count, &total, eof,
+						  preadv2_flags);
 		break;
 	default:
 		ASSERT(0);
@@ -499,7 +527,7 @@ pread_init(void)
 	pread_cmd.argmin = 2;
 	pread_cmd.argmax = -1;
 	pread_cmd.flags = CMD_NOMAP_OK | CMD_FOREIGN_OK;
-	pread_cmd.args = _("[-b bs] [-qv] [-i N] [-FBR [-Z N]] off len");
+	pread_cmd.args = _("[-b bs] [-qUv] [-i N] [-FBR [-Z N]] off len");
 	pread_cmd.oneline = _("reads a number of bytes at a specified offset");
 	pread_cmd.help = pread_help;
 

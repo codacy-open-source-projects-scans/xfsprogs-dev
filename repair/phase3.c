@@ -17,6 +17,7 @@
 #include "progress.h"
 #include "bmap.h"
 #include "threads.h"
+#include "rt.h"
 
 static void
 process_agi_unlinked(
@@ -116,6 +117,9 @@ phase3(
 
 	set_progress_msg(PROG_FMT_AGI_UNLINKED, (uint64_t) glob_agcount);
 
+	if (xfs_has_rtsb(mp) && xfs_has_realtime(mp))
+		check_rtsb(mp);
+
 	/* first clear the agi unlinked AGI list */
 	if (!no_modify) {
 		for (i = 0; i < mp->m_sb.sb_agcount; i++)
@@ -146,7 +150,7 @@ phase3(
 	do_log(_("        - process newly discovered inodes...\n"));
 	set_progress_msg(PROG_FMT_NEW_INODES, (uint64_t) glob_agcount);
 
-	counts = calloc(sizeof(*counts), mp->m_sb.sb_agcount);
+	counts = calloc(mp->m_sb.sb_agcount, sizeof(*counts));
 	if (!counts) {
 		do_abort(_("no memory for uncertain inode counts\n"));
 		return;

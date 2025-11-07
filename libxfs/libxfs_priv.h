@@ -37,8 +37,9 @@
 #ifndef __LIBXFS_INTERNAL_XFS_H__
 #define __LIBXFS_INTERNAL_XFS_H__
 
-#define CONFIG_XFS_RT
-#define CONFIG_XFS_BTREE_IN_MEM
+/* CONFIG_XFS_* must be defined to 1 to work with IS_ENABLED() */
+#define CONFIG_XFS_RT 1
+#define CONFIG_XFS_BTREE_IN_MEM 1
 
 #include "libxfs_api_defs.h"
 #include "platform_defs.h"
@@ -52,6 +53,7 @@
 #include "libfrog/radix-tree.h"
 #include "libfrog/bitmask.h"
 #include "libfrog/div64.h"
+#include "libfrog/util.h"
 #include "atomic.h"
 #include "spinlock.h"
 #include "linux-err.h"
@@ -149,6 +151,7 @@ enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
 
 #define xfs_force_shutdown(d,n)		((void) 0)
 #define xfs_mod_delalloc(a,b,c)		((void) 0)
+#define xfs_mod_sb_delalloc(sb, d)	((void) 0)
 
 /* stop unused var warnings by assigning mp to itself */
 
@@ -178,8 +181,7 @@ enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
 #define XFS_ERRLEVEL_LOW		1
 #define XFS_ILOCK_EXCL			0
 #define XFS_ILOCK_SHARED		0
-#define XFS_ILOCK_RTBITMAP		0
-#define XFS_ILOCK_RTSUM			0
+#define XFS_IOLOCK_EXCL			0
 #define XFS_STATS_INC(mp, count)	do { (mp) = (mp); } while (0)
 #define XFS_STATS_DEC(mp, count, x)	do { (mp) = (mp); } while (0)
 #define XFS_STATS_ADD(mp, count, x)	do { (mp) = (mp); } while (0)
@@ -202,17 +204,13 @@ enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
 #define xfs_info_once(dev, fmt, ...)				\
 	xfs_printk_once(xfs_info, dev, fmt, ##__VA_ARGS__)
 
-/* miscellaneous kernel routines not in user space */
-#define likely(x)		(x)
-#define unlikely(x)		(x)
-
 /* Need to be able to handle this bare or in control flow */
 static inline bool WARN_ON(bool expr) {
 	return (expr);
 }
 
 #define WARN_ON_ONCE(e)			WARN_ON(e)
-#define percpu_counter_read(x)		(*x)
+
 #define percpu_counter_read_positive(x)	((*x) > 0 ? (*x) : 0)
 #define percpu_counter_sum_positive(x)	((*x) > 0 ? (*x) : 0)
 
@@ -223,6 +221,7 @@ uint32_t get_random_u32(void);
 #endif
 
 #define PAGE_SIZE		getpagesize()
+extern unsigned int PAGE_SHIFT;
 
 #define inode_peek_iversion(inode)	(inode)->i_version
 #define inode_set_iversion_queried(inode, version) do { \
@@ -234,35 +233,6 @@ struct mnt_idmap;
 
 void inode_init_owner(struct mnt_idmap *idmap, struct inode *inode,
 		      const struct inode *dir, umode_t mode);
-
-#define __must_check	__attribute__((__warn_unused_result__))
-
-/*
- * Allows for effectively applying __must_check to a macro so we can have
- * both the type-agnostic benefits of the macros while also being able to
- * enforce that the return value is, in fact, checked.
- */
-static inline bool __must_check __must_check_overflow(bool overflow)
-{
-	return unlikely(overflow);
-}
-
-/*
- * For simplicity and code hygiene, the fallback code below insists on
- * a, b and *d having the same type (similar to the min() and max()
- * macros), whereas gcc's type-generic overflow checkers accept
- * different types. Hence we don't just make check_add_overflow an
- * alias for __builtin_add_overflow, but add type checks similar to
- * below.
- */
-#define check_add_overflow(a, b, d) __must_check_overflow(({	\
-	typeof(a) __a = (a);			\
-	typeof(b) __b = (b);			\
-	typeof(d) __d = (d);			\
-	(void) (&__a == &__b);			\
-	(void) (&__a == __d);			\
-	__builtin_add_overflow(__a, __b, __d);	\
-}))
 
 #define min_t(type,x,y) \
 	({ type __x = (x); type __y = (y); __x < __y ? __x: __y; })
@@ -338,12 +308,6 @@ find_next_zero_bit(const unsigned long *addr, unsigned long size,
 }
 #define find_first_zero_bit(addr, size) find_next_zero_bit((addr), (size), 0)
 
-static inline __attribute__((const))
-int is_power_of_2(unsigned long n)
-{
-	return (n != 0 && ((n & (n - 1)) == 0));
-}
-
 /*
  * xfs_iroundup: round up argument to next power of two
  */
@@ -395,7 +359,6 @@ static inline unsigned long long mask64_if_power2(unsigned long b)
 
 /* buffer management */
 #define XBF_TRYLOCK			0
-#define XBF_UNMAPPED			0
 #define XBF_DONE			0
 #define xfs_buf_stale(bp)		((bp)->b_flags |= LIBXFS_B_STALE)
 #define XFS_BUF_UNDELAYWRITE(bp)	((bp)->b_flags &= ~LIBXFS_B_DIRTY)
@@ -463,13 +426,13 @@ xfs_buf_readahead(
 #define XFS_EXTENT_BUSY_DISCARDED	0x01	/* undergoing a discard op. */
 #define XFS_EXTENT_BUSY_SKIP_DISCARD	0x02	/* do not discard */
 
-#define xfs_extent_busy_reuse(mp,ag,bno,len,user)	((void) 0)
+#define xfs_extent_busy_reuse(...)			((void) 0)
 /* avoid unused variable warning */
-#define xfs_extent_busy_insert(tp,pag,bno,len,flags)({ 	\
-	struct xfs_perag *__foo = pag;			\
+#define xfs_extent_busy_insert(tp,xg,bno,len,flags)({ 	\
+	struct xfs_group *__foo = xg;			\
 	__foo = __foo; /* no set-but-unused warning */	\
 })
-#define xfs_extent_busy_trim(args,bno,len,busy_gen) 	({	\
+#define xfs_extent_busy_trim(group,minlen,maxlen,bno,len,busy_gen) 	({	\
 	unsigned __foo = *(busy_gen);				\
 	*(busy_gen) = __foo;					\
 	false;							\
@@ -506,6 +469,8 @@ static inline int retzero(void) { return 0; }
 #define xfs_icreate_log(tp, agno, agbno, cnt, isize, len, gen) ((void) 0)
 #define xfs_sb_validate_fsb_count(sbp, nblks)		(0)
 #define xlog_calc_iovec_len(len)		roundup(len, sizeof(uint32_t))
+
+#define xfs_zoned_add_available(mp, rtxnum)	do { } while (0)
 
 /*
  * Prototypes for kernel static functions that are aren't in their
@@ -630,6 +595,7 @@ int xfs_bmap_last_extent(struct xfs_trans *tp, struct xfs_inode *ip,
 
 /* xfs_inode.h */
 #define xfs_iflags_set(ip, flags)	do { } while (0)
+#define xfs_finish_inode_setup(ip)	((void) 0)
 
 /* linux/wordpart.h */
 

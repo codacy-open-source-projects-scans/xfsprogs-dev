@@ -14,6 +14,7 @@
 #include "libfrog/bulkstat.h"
 #include "space.h"
 #include "libfrog/getparents.h"
+#include "libfrog/handle_priv.h"
 
 static cmdinfo_t health_cmd;
 static unsigned long long reported;
@@ -39,6 +40,16 @@ static bool has_rmapbt(const struct xfs_fsop_geom *g)
 static bool has_reflink(const struct xfs_fsop_geom *g)
 {
 	return g->flags & XFS_FSOP_GEOM_FLAGS_REFLINK;
+}
+
+static bool has_rtrmapbt(const struct xfs_fsop_geom *g)
+{
+	return g->rtblocks > 0 && (g->flags & XFS_FSOP_GEOM_FLAGS_RMAPBT);
+}
+
+static bool has_rtreflink(const struct xfs_fsop_geom *g)
+{
+	return g->rtblocks > 0 && (g->flags & XFS_FSOP_GEOM_FLAGS_REFLINK);
 }
 
 struct flag_map {
@@ -132,6 +143,32 @@ static const struct flag_map ag_flags[] = {
 	{0},
 };
 
+static const struct flag_map rtgroup_flags[] = {
+	{
+		.mask = XFS_RTGROUP_GEOM_SICK_SUPER,
+		.descr = "superblock",
+	},
+	{
+		.mask = XFS_RTGROUP_GEOM_SICK_BITMAP,
+		.descr = "realtime bitmap",
+	},
+	{
+		.mask = XFS_RTGROUP_GEOM_SICK_SUMMARY,
+		.descr = "realtime summary",
+	},
+	{
+		.mask = XFS_RTGROUP_GEOM_SICK_RMAPBT,
+		.descr = "realtime reverse mappings btree",
+		.has_fn = has_rtrmapbt,
+	},
+	{
+		.mask = XFS_RTGROUP_GEOM_SICK_REFCNTBT,
+		.descr = "realtime reference count btree",
+		.has_fn = has_rtreflink,
+	},
+	{0},
+};
+
 static const struct flag_map inode_flags[] = {
 	{
 		.mask = XFS_BS_SICK_INODE,
@@ -216,6 +253,25 @@ report_ag_sick(
 	return 0;
 }
 
+/* Report on a rt group's health. */
+static int
+report_rtgroup_sick(
+	xfs_rgnumber_t		rgno)
+{
+	struct xfs_rtgroup_geometry rgeo = { 0 };
+	char			descr[256];
+	int			ret;
+
+	ret = -xfrog_rtgroup_geometry(file->xfd.fd, rgno, &rgeo);
+	if (ret) {
+		xfrog_perror(ret, "rtgroup_geometry");
+		return 1;
+	}
+	snprintf(descr, sizeof(descr) - 1, _("rtgroup %u"), rgno);
+	report_sick(descr, rtgroup_flags, rgeo.rg_sick, rgeo.rg_checked);
+	return 0;
+}
+
 /* Report on an inode's health. */
 static int
 report_inode_health(
@@ -282,12 +338,8 @@ report_inode(
 	    (file->xfd.fsgeom.flags & XFS_FSOP_GEOM_FLAGS_PARENT)) {
 		struct xfs_handle handle;
 
-		memcpy(&handle.ha_fsid, file->fshandle, sizeof(handle.ha_fsid));
-		handle.ha_fid.fid_len = sizeof(xfs_fid_t) -
-				sizeof(handle.ha_fid.fid_len);
-		handle.ha_fid.fid_pad = 0;
-		handle.ha_fid.fid_ino = bs->bs_ino;
-		handle.ha_fid.fid_gen = bs->bs_gen;
+		handle_from_fshandle(&handle, file->fshandle, file->fshandle_len);
+		handle_from_bulkstat(&handle, bs);
 
 		ret = handle_to_path(&handle, sizeof(struct xfs_handle), 0,
 				descr, sizeof(descr) - 1);
@@ -324,6 +376,8 @@ report_bulkstat_health(
 
 	if (agno != NULLAGNUMBER)
 		xfrog_bulkstat_set_ag(breq, agno);
+	if (file->xfd.fsgeom.flags & XFS_FSOP_GEOM_FLAGS_METADIR)
+		breq->hdr.flags |= XFS_BULK_IREQ_METADIR;
 
 	do {
 		error = -xfrog_bulkstat(&file->xfd, breq);
@@ -340,7 +394,7 @@ report_bulkstat_health(
 	return error;
 }
 
-#define OPT_STRING ("a:cfi:nq")
+#define OPT_STRING ("a:cfi:nqr:")
 
 /* Report on health problems in XFS filesystem. */
 static int
@@ -350,6 +404,7 @@ health_f(
 {
 	unsigned long long	x;
 	xfs_agnumber_t		agno;
+	xfs_rgnumber_t		rgno;
 	bool			default_report = true;
 	int			c;
 	int			ret;
@@ -397,6 +452,17 @@ health_f(
 		case 'q':
 			quiet = true;
 			break;
+		case 'r':
+			default_report = false;
+			errno = 0;
+			x = strtoll(optarg, NULL, 10);
+			if (!errno && x >= NULLRGNUMBER)
+				errno = ERANGE;
+			if (errno) {
+				perror("rtgroup health");
+				return 1;
+			}
+			break;
 		default:
 			return command_usage(&health_cmd);
 		}
@@ -432,6 +498,12 @@ health_f(
 			if (ret)
 				return 1;
 			break;
+		case 'r':
+			rgno = strtoll(optarg, NULL, 10);
+			ret = report_rtgroup_sick(rgno);
+			if (ret)
+				return 1;
+			break;
 		default:
 			break;
 		}
@@ -450,6 +522,11 @@ health_f(
 
 		for (agno = 0; agno < file->xfd.fsgeom.agcount; agno++) {
 			ret = report_ag_sick(agno);
+			if (ret)
+				return 1;
+		}
+		for (rgno = 0; rgno < file->xfd.fsgeom.rgcount; rgno++) {
+			ret = report_rtgroup_sick(rgno);
 			if (ret)
 				return 1;
 		}
@@ -483,6 +560,7 @@ health_help(void)
 " -i inum  -- Report health of a given inode number.\n"
 " -n       -- Try to report file names.\n"
 " -q       -- Only report unhealthy metadata.\n"
+" -r rgno  -- Report health of the given realtime group.\n"
 " paths    -- Report health of the given file path.\n"
 "\n"));
 
@@ -493,7 +571,7 @@ static cmdinfo_t health_cmd = {
 	.cfunc = health_f,
 	.argmin = 0,
 	.argmax = -1,
-	.args = "[-a agno] [-c] [-f] [-i inum] [-n] [-q] [paths]",
+	.args = "[-a agno] [-c] [-f] [-i inum] [-n] [-q] [-r rgno] [paths]",
 	.flags = CMD_FLAG_ONESHOT,
 	.help = health_help,
 };

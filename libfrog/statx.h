@@ -61,6 +61,7 @@ struct statx_timestamp {
 	__s32	tv_nsec;
 	__s32	__reserved;
 };
+#endif
 
 /*
  * Structures for the extended file attribute retrieval system call
@@ -99,6 +100,8 @@ struct statx_timestamp {
  * will have values installed for compatibility purposes so that stat() and
  * co. can be emulated in userspace.
  */
+#ifdef OVERRIDE_SYSTEM_STATX
+#undef statx
 struct statx {
 	/* 0x00 */
 	__u32	stx_mask;	/* What results were written [uncond] */
@@ -126,10 +129,47 @@ struct statx {
 	__u32	stx_dev_major;	/* ID of device containing file [uncond] */
 	__u32	stx_dev_minor;
 	/* 0x90 */
-	__u64	__spare2[14];	/* Spare space for future expansion */
+	__u64	stx_mnt_id;
+	__u32	stx_dio_mem_align;	/* Memory buffer alignment for direct I/O */
+	__u32	stx_dio_offset_align;	/* File offset alignment for direct I/O */
+	/* 0xa0 */
+	__u64	stx_subvol;	/* Subvolume identifier */
+	__u32	stx_atomic_write_unit_min;	/* Min atomic write unit in bytes */
+	__u32	stx_atomic_write_unit_max;	/* Max atomic write unit in bytes */
+	/* 0xb0 */
+	__u32   stx_atomic_write_segments_max;	/* Max atomic write segment count */
+
+	/* File offset alignment for direct I/O reads */
+	__u32	stx_dio_read_offset_align;
+
+	/* 0xb8 */
+	/* Optimised max atomic write unit in bytes */
+	__u32	stx_atomic_write_unit_max_opt;
+	__u32	__spare2[1];
+	/* 0xc0 */
+	__u64	__spare3[8];	/* Spare space for future expansion */
 	/* 0x100 */
 };
 
+static inline ssize_t
+statx(
+	int		dfd,
+	const char	*filename,
+	unsigned int	flags,
+	unsigned int	mask,
+	struct statx	*buffer)
+{
+#ifdef __NR_statx
+	return syscall(__NR_statx, dfd, filename, flags, mask, buffer);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+#endif /* OVERRIDE_SYSTEM_STATX */
+
+#ifndef STATX_TYPE
 /*
  * Flags to be stx_mask
  *
@@ -151,8 +191,13 @@ struct statx {
 #define STATX_BLOCKS		0x00000400U	/* Want/got stx_blocks */
 #define STATX_BASIC_STATS	0x000007ffU	/* The stuff in the normal stat struct */
 #define STATX_BTIME		0x00000800U	/* Want/got stx_btime */
-#define STATX_ALL		0x00000fffU	/* All currently supported flags */
-#define STATX__RESERVED		0x80000000U	/* Reserved for future struct statx expansion */
+
+/*
+ * This is deprecated, and shall remain the same value in the future.  To avoid
+ * confusion please use the equivalent (STATX_BASIC_STATS | STATX_BTIME)
+ * instead.
+ */
+#define STATX_ALL		0x00000fffU
 
 /*
  * Attributes to be found in stx_attributes
@@ -174,4 +219,33 @@ struct statx {
 #define STATX_ATTR_AUTOMOUNT		0x00001000 /* Dir: Automount trigger */
 
 #endif /* STATX_TYPE */
+
+#ifndef STATX__RESERVED
+#define STATX__RESERVED		0x80000000U	/* Reserved for future struct statx expansion */
+#endif
+
+#ifndef STATX_MNT_ID
+#define STATX_MNT_ID		0x00001000U	/* Got stx_mnt_id */
+#endif
+
+#ifndef STATX_DIOALIGN
+#define STATX_DIOALIGN		0x00002000U	/* Want/got direct I/O alignment info */
+#endif
+
+#ifndef STATX_MNT_ID_UNIQUE
+#define STATX_MNT_ID_UNIQUE	0x00004000U	/* Want/got extended stx_mount_id */
+#endif
+
+#ifndef STATX_SUBVOL
+#define STATX_SUBVOL		0x00008000U	/* Want/got stx_subvol */
+#endif
+
+#ifndef STATX_WRITE_ATOMIC
+#define STATX_WRITE_ATOMIC	0x00010000U	/* Want/got atomic_write_* fields */
+#endif
+
+#ifndef STATX_DIO_READ_ALIGN
+#define STATX_DIO_READ_ALIGN	0x00020000U	/* Want/got dio read alignment info */
+#endif
+
 #endif /* XFS_IO_STATX_H */

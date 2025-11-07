@@ -23,25 +23,45 @@ void		init_bmaps(xfs_mount_t *mp);
 void		reset_bmaps(xfs_mount_t *mp);
 void		free_bmaps(xfs_mount_t *mp);
 
-void		set_bmap_ext(xfs_agnumber_t agno, xfs_agblock_t agbno,
-			     xfs_extlen_t blen, int state);
-int		get_bmap_ext(xfs_agnumber_t agno, xfs_agblock_t agbno,
-			     xfs_agblock_t maxbno, xfs_extlen_t *blen);
+void		lock_group(xfs_agnumber_t agno, bool isrt);
+void		unlock_group(xfs_agnumber_t agno, bool isrt);
 
-void		set_rtbmap(xfs_rtxnum_t rtx, int state);
-int		get_rtbmap(xfs_rtxnum_t rtx);
+static inline void lock_ag(xfs_agnumber_t agno)
+{
+	lock_group(agno, false);
+}
+
+static inline void unlock_ag(xfs_agnumber_t agno)
+{
+	unlock_group(agno, false);
+}
+
+void		set_bmap_ext(xfs_agnumber_t agno, xfs_agblock_t agbno,
+			     xfs_extlen_t blen, int state, bool isrt);
+int		get_bmap_ext(xfs_agnumber_t agno, xfs_agblock_t agbno,
+			     xfs_agblock_t maxbno, xfs_extlen_t *blen,
+			     bool isrt);
 
 static inline void
 set_bmap(xfs_agnumber_t agno, xfs_agblock_t agbno, int state)
 {
-	set_bmap_ext(agno, agbno, 1, state);
+	set_bmap_ext(agno, agbno, 1, state, false);
 }
 
 static inline int
 get_bmap(xfs_agnumber_t agno, xfs_agblock_t agbno)
 {
-	return get_bmap_ext(agno, agbno, agbno + 1, NULL);
+	return get_bmap_ext(agno, agbno, agbno + 1, NULL, false);
 }
+
+static inline int
+get_rgbmap(xfs_rgnumber_t rgno, xfs_rgblock_t rgbno)
+{
+	return get_bmap_ext(rgno, rgbno, rgbno + 1, NULL, true);
+}
+
+void		set_rtbmap(xfs_rtxnum_t rtx, int state);
+int		get_rtbmap(xfs_rtxnum_t rtx);
 
 /*
  * extent tree definitions
@@ -85,18 +105,25 @@ typedef struct rt_extent_tree_node  {
 #define XR_E_UNKNOWN	0	/* unknown state */
 #define XR_E_FREE1	1	/* free block (marked by one fs space tree) */
 #define XR_E_FREE	2	/* free block (marked by both fs space trees) */
-#define XR_E_INUSE	3	/* extent used by file/dir data or metadata */
-#define XR_E_INUSE_FS	4	/* extent used by fs ag header or log */
-#define XR_E_MULT	5	/* extent is multiply referenced */
-#define XR_E_INO	6	/* extent used by inodes (inode blocks) */
-#define XR_E_FS_MAP	7	/* extent used by fs space/inode maps */
-#define XR_E_INUSE1	8	/* used block (marked by rmap btree) */
-#define XR_E_INUSE_FS1	9	/* used by fs ag header or log (rmap btree) */
-#define XR_E_INO1	10	/* used by inodes (marked by rmap btree) */
-#define XR_E_FS_MAP1	11	/* used by fs space/inode maps (rmap btree) */
-#define XR_E_REFC	12	/* used by fs ag reference count btree */
-#define XR_E_COW	13	/* leftover cow extent */
-#define XR_E_BAD_STATE	14
+/*
+ * Space used by metadata files.  The entire metadata directory tree will be
+ * rebuilt from scratch during phase 6, so this value must be less than
+ * XR_E_INUSE so that the space will go back to the free space btrees during
+ * phase 5.
+ */
+#define XR_E_METADATA	3
+#define XR_E_INUSE	4	/* extent used by file/dir data or metadata */
+#define XR_E_INUSE_FS	5	/* extent used by fs ag header or log */
+#define XR_E_MULT	6	/* extent is multiply referenced */
+#define XR_E_INO	7	/* extent used by inodes (inode blocks) */
+#define XR_E_FS_MAP	8	/* extent used by fs space/inode maps */
+#define XR_E_INUSE1	9	/* used block (marked by rmap btree) */
+#define XR_E_INUSE_FS1	10	/* used by fs ag header or log (rmap btree) */
+#define XR_E_INO1	11	/* used by inodes (marked by rmap btree) */
+#define XR_E_FS_MAP1	12	/* used by fs space/inode maps (rmap btree) */
+#define XR_E_REFC	13	/* used by fs ag reference count btree */
+#define XR_E_COW	14	/* leftover cow extent */
+#define XR_E_BAD_STATE	15
 
 /* separate state bit, OR'ed into high (4th) bit of ex_state field */
 
@@ -214,6 +241,8 @@ int		count_bcnt_extents(xfs_agnumber_t);
 #define XR_INO_UQUOTA	12		/* user quota inode */
 #define XR_INO_GQUOTA	13		/* group quota inode */
 #define XR_INO_PQUOTA	14		/* project quota inode */
+#define XR_INO_RTRMAP	15		/* realtime rmap */
+#define XR_INO_RTREFC	16		/* realtime refcount */
 
 /* inode allocation tree */
 
@@ -271,6 +300,7 @@ typedef struct ino_tree_node  {
 	uint64_t		ino_isa_dir;	/* bit == 1 if a directory */
 	uint64_t		ino_was_rl;	/* bit == 1 if reflink flag set */
 	uint64_t		ino_is_rl;	/* bit == 1 if reflink flag should be set */
+	uint64_t		ino_is_meta;	/* bit == 1 if metadata */
 	uint8_t			nlink_size;
 	union ino_nlink		disk_nlinks;	/* on-disk nlinks, set in P3 */
 	union  {
@@ -539,6 +569,24 @@ static inline int inode_is_rl(struct ino_tree_node *irec, int offset)
 }
 
 /*
+ * set/clear/test was inode marked as metadata
+ */
+static inline void set_inode_is_meta(struct ino_tree_node *irec, int offset)
+{
+	irec->ino_is_meta |= IREC_MASK(offset);
+}
+
+static inline void clear_inode_is_meta(struct ino_tree_node *irec, int offset)
+{
+	irec->ino_is_meta &= ~IREC_MASK(offset);
+}
+
+static inline int inode_is_meta(struct ino_tree_node *irec, int offset)
+{
+	return (irec->ino_is_meta & IREC_MASK(offset)) != 0;
+}
+
+/*
  * add_inode_reached() is set on inode I only if I has been reached
  * by an inode P claiming to be the parent and if I is a directory,
  * the .. link in the I says that P is I's parent.
@@ -659,6 +707,21 @@ inorec_set_freecount(
 		rp->ir_u.sp.ir_freecount = freecount;
 	else
 		rp->ir_u.f.ir_freecount = cpu_to_be32(freecount);
+}
+
+/*
+ * Number of inodes assumed to be always allocated because they are created
+ * by mkfs.
+ */
+static inline unsigned int
+xfs_rootrec_inodes_inuse(
+	struct xfs_mount	*mp)
+{
+	if (xfs_has_rtgroups(mp))
+		return 2; /* sb_rootino, sb_metadirino */
+	if (xfs_has_metadir(mp))
+		return 4; /* sb_rootino, sb_rbmino, sb_rsumino, sb_metadirino */
+	return 3; /* sb_rootino, sb_rbmino, sb_rsumino */
 }
 
 #endif /* XFS_REPAIR_INCORE_H */

@@ -4,11 +4,18 @@
  * All Rights Reserved.
  */
 
+#ifdef OVERRIDE_SYSTEM_STATX
+#define statx sys_statx
+#endif
+#include <fcntl.h>
+#include <sys/stat.h>
+
 #include "libxfs_priv.h"
 #include "libxcmd.h"
 #include <blkid/blkid.h>
 #include "xfs_multidisk.h"
 #include "libfrog/platform.h"
+#include "libfrog/statx.h"
 
 #define TERABYTES(count, blog)	((uint64_t)(count) << (40 - (blog)))
 #define GIGABYTES(count, blog)	((uint64_t)(count) << (30 - (blog)))
@@ -87,6 +94,48 @@ done:
 	*agcount = dblocks / blocks + (dblocks % blocks != 0);
 }
 
+void
+calc_default_rtgroup_geometry(
+	int		blocklog,
+	uint64_t	rblocks,
+	uint64_t	*rgsize,
+	uint64_t	*rgcount)
+{
+	uint64_t	blocks = 0;
+	int		shift = 0;
+
+	/*
+	 * For a single underlying storage device over 4TB in size use the
+	 * maximum rtgroup size.  Between 128MB and 4TB, just use 4 rtgroups
+	 * and scale up smoothly between min/max rtgroup sizes.
+	 */
+	if (rblocks >= TERABYTES(4, blocklog)) {
+		blocks = XFS_MAX_RGBLOCKS;
+		goto done;
+	}
+	if (rblocks >= MEGABYTES(128, blocklog)) {
+		shift = XFS_NOMULTIDISK_AGLOG;
+		goto calc_blocks;
+	}
+
+	/*
+	 * If rblocks is not evenly divisible by the number of desired rt
+	 * groups, round "blocks" up so we don't lose the last bit of the
+	 * filesystem. The same principle applies to the rt group count, so we
+	 * don't lose the last rt group!
+	 */
+calc_blocks:
+	ASSERT(shift >= 0 && shift <= XFS_MULTIDISK_AGLOG);
+	blocks = rblocks >> shift;
+	if (rblocks & xfs_mask32lo(shift)) {
+		if (blocks < XFS_MAX_RGBLOCKS)
+		    blocks++;
+	}
+done:
+	*rgsize = blocks;
+	*rgcount = rblocks / blocks + (rblocks % blocks != 0);
+}
+
 /*
  * Check for existing filesystem or partition table on device.
  * Returns:
@@ -163,7 +212,8 @@ check_overwrite(
 out:
 	if (pr)
 		blkid_free_probe(pr);
-	if (ret == -1)
+	/* libblkid 2.38.1 lies and can return -EIO */
+	if (ret < 0)
 		fprintf(stderr,
 			_("%s: probe of %s failed, cannot detect "
 			  "existing filesystem.\n"), progname, device);
@@ -236,6 +286,34 @@ out_free_probe:
 }
 
 static void
+get_hw_atomic_writes_topology(
+	struct libxfs_dev	*dev,
+	struct device_topology	*dt)
+{
+	struct statx		sx;
+	int			fd;
+	int			ret;
+
+	fd = open(dev->name, O_RDONLY);
+	if (fd < 0)
+		return;
+
+	ret = statx(fd, "", AT_EMPTY_PATH, STATX_WRITE_ATOMIC, &sx);
+	if (ret)
+		goto out_close;
+
+	if (!(sx.stx_mask & STATX_WRITE_ATOMIC))
+		goto out_close;
+
+	dt->awu_min = sx.stx_atomic_write_unit_min >> 9;
+	dt->awu_max = max(sx.stx_atomic_write_unit_max_opt,
+			  sx.stx_atomic_write_unit_max) >> 9;
+
+out_close:
+	close(fd);
+}
+
+static void
 get_device_topology(
 	struct libxfs_dev	*dev,
 	struct device_topology	*dt,
@@ -273,6 +351,7 @@ get_device_topology(
 		}
 	} else {
 		blkid_get_topology(dev->name, dt, force_overwrite);
+		get_hw_atomic_writes_topology(dev, dt);
 	}
 
 	ASSERT(dt->logical_sector_size);

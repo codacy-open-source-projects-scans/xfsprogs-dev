@@ -27,6 +27,7 @@ static int	label_f(int argc, char **argv);
 static void     label_help(void);
 static int	version_f(int argc, char **argv);
 static void     version_help(void);
+static size_t check_label(char *label, bool can_warn);
 
 static const cmdinfo_t	sb_cmd =
 	{ "sb", NULL, sb_f, 0, 1, 1, N_("[agno]"),
@@ -48,6 +49,18 @@ sb_init(void)
 	add_command(&uuid_cmd);
 	add_command(&label_cmd);
 	add_command(&version_cmd);
+}
+
+/*
+ * Counts superblock fields that only exist when the metadata directory feature
+ * is enabled.
+ */
+static int
+metadirfld_count(
+	void		*obj,
+	int		startoff)
+{
+	return xfs_has_metadir(mp) ? 1 : 0;
 }
 
 #define	OFF(f)	bitize(offsetof(struct xfs_dsb, sb_ ## f))
@@ -113,6 +126,16 @@ const field_t	sb_flds[] = {
 	{ "pquotino", FLDT_INO, OI(OFF(pquotino)), C1, 0, TYP_INODE },
 	{ "lsn", FLDT_UINT64X, OI(OFF(lsn)), C1, 0, TYP_NONE },
 	{ "meta_uuid", FLDT_UUID, OI(OFF(meta_uuid)), C1, 0, TYP_NONE },
+	{ "metadirino", FLDT_INO, OI(OFF(metadirino)), metadirfld_count,
+		FLD_COUNT, TYP_INODE },
+	{ "rgcount", FLDT_RGNUMBER, OI(OFF(rgcount)), metadirfld_count,
+		FLD_COUNT, TYP_NONE },
+	{ "rgextents", FLDT_RTXLEN, OI(OFF(rgextents)), metadirfld_count,
+		FLD_COUNT, TYP_NONE },
+	{ "rgblklog", FLDT_UINT8D, OI(OFF(rgblklog)), metadirfld_count,
+		FLD_COUNT, TYP_NONE },
+	{ "pad", FLDT_UINT8X, OI(OFF(pad)), metadirfld_count,
+		FLD_COUNT, TYP_NONE },
 	{ NULL }
 };
 
@@ -243,10 +266,11 @@ sb_logcheck(void)
 		dbprintf(_(
 "ERROR: The filesystem has valuable metadata changes in a log which needs to\n"
 "be replayed.  Mount the filesystem to replay the log, and unmount it before\n"
-"re-running %s.  If you are unable to mount the filesystem, then use\n"
-"the xfs_repair -L option to destroy the log and attempt a repair.\n"
-"Note that destroying the log may cause corruption -- please attempt a mount\n"
-"of the filesystem before doing this.\n"), progname);
+"re-running %s.  If the filesystem is a snapshot of a mounted filesystem,\n"
+"you may need to give mount the nouuid option.  If you are unable to mount\n"
+"the filesystem, then use the xfs_repair -L option to destroy the log and\n"
+"attempt a repair.  Note that destroying the log may cause corruption --\n"
+"please attempt a mount of the filesystem before doing this.\n"), progname);
 		return 0;
 	}
 	/* Log is clean */
@@ -310,6 +334,65 @@ uuid_help(void)
 ));
 }
 
+static bool
+check_rtsb(
+	struct xfs_mount	*mp)
+{
+	int			error;
+
+	if (!xfs_has_realtime(mp) || !xfs_has_rtsb(mp))
+		return false;
+
+	push_cur();
+	error = set_rt_cur(&typtab[TYP_RTSB], XFS_RTSB_DADDR,
+			XFS_FSB_TO_BB(mp, 1), DB_RING_ADD, NULL);
+	if (error == ENODEV) {
+		/* no rt dev means we should just bail out */
+		pop_cur();
+		return true;
+	}
+
+	pop_cur();
+	return false;
+}
+
+static int
+update_rtsb(
+	struct xfs_mount	*mp,
+	uuid_t			*uuid,
+	char			*label)
+{
+	struct xfs_rtsb		*rsb;
+	int			error;
+
+	if (!xfs_has_rtsb(mp) || !xfs_has_realtime(mp))
+		return false;
+
+	push_cur();
+	error = set_rt_cur(&typtab[TYP_RTSB], XFS_RTSB_DADDR,
+			XFS_FSB_TO_BB(mp, 1), DB_RING_ADD, NULL);
+	if (error == ENODEV) {
+		/* no rt dev means we should just bail out */
+		exitcode = 1;
+		pop_cur();
+		return 1;
+	}
+
+	rsb = iocur_top->data;
+	if (label) {
+		size_t	len = check_label(label, false);
+
+		memset(&rsb->rsb_fname, 0, XFSLABEL_MAX);
+		memcpy(&rsb->rsb_fname, label, len);
+	}
+	if (uuid)
+		memcpy(&rsb->rsb_uuid, uuid, sizeof(rsb->rsb_uuid));
+	write_cur();
+	pop_cur();
+
+	return 0;
+}
+
 static uuid_t *
 do_uuid(xfs_agnumber_t agno, uuid_t *uuid)
 {
@@ -354,6 +437,7 @@ write:
 	memcpy(&tsb.sb_uuid, uuid, sizeof(uuid_t));
 	libxfs_sb_to_disk(iocur_top->data, &tsb);
 	write_cur();
+	memcpy(&mp->m_sb.sb_uuid, uuid, sizeof(uuid_t));
 	return uuid;
 }
 
@@ -416,11 +500,18 @@ uuid_f(
 			}
 		}
 
+		if (check_rtsb(mp)) {
+			exitcode = 1;
+			return 0;
+		}
+
 		/* clear the log (setting uuid) if it's not dirty */
 		if (!sb_logzero(&uu))
 			return 0;
 
 		dbprintf(_("writing all SBs\n"));
+		if (update_rtsb(mp, &uu, NULL))
+			return 1;
 		for (agno = 0; agno < mp->m_sb.sb_agcount; agno++)
 			if (!do_uuid(agno, &uu)) {
 				dbprintf(_("failed to set UUID in AG %d\n"), agno);
@@ -489,6 +580,27 @@ label_help(void)
 ));
 }
 
+static size_t
+check_label(
+	char	*label,
+	bool	can_warn)
+{
+	size_t	len = strlen(label);
+
+	if (len > XFSLABEL_MAX) {
+		if (can_warn)
+			dbprintf(_("%s: truncating label length from %d to %d\n"),
+				progname, (int)len, XFSLABEL_MAX);
+		len = XFSLABEL_MAX;
+	}
+	if ( len == 2 &&
+	     (strcmp(label, "\"\"") == 0 ||
+	      strcmp(label, "''")   == 0 ||
+	      strcmp(label, "--")   == 0) )
+		label[0] = label[1] = '\0';
+	return len;
+}
+
 static char *
 do_label(xfs_agnumber_t agno, char *label)
 {
@@ -507,22 +619,13 @@ do_label(xfs_agnumber_t agno, char *label)
 		return &lbl[0];
 	}
 	/* set label */
-	if ((len = strlen(label)) > sizeof(tsb.sb_fname)) {
-		if (agno == 0)
-			dbprintf(_("%s: truncating label length from %d to %d\n"),
-				progname, (int)len, (int)sizeof(tsb.sb_fname));
-		len = sizeof(tsb.sb_fname);
-	}
-	if ( len == 2 &&
-	     (strcmp(label, "\"\"") == 0 ||
-	      strcmp(label, "''")   == 0 ||
-	      strcmp(label, "--")   == 0) )
-		label[0] = label[1] = '\0';
+	len = check_label(label, agno == 0);
 	memset(&tsb.sb_fname, 0, sizeof(tsb.sb_fname));
 	memcpy(&tsb.sb_fname, label, len);
 	memcpy(&lbl[0], &tsb.sb_fname, sizeof(tsb.sb_fname));
 	libxfs_sb_to_disk(iocur_top->data, &tsb);
 	write_cur();
+	memcpy(&mp->m_sb.sb_fname, &tsb.sb_fname, XFSLABEL_MAX);
 	return &lbl[0];
 }
 
@@ -554,7 +657,14 @@ label_f(
 			return 0;
 		}
 
+		if (check_rtsb(mp)) {
+			exitcode = 1;
+			return 0;
+		}
+
 		dbprintf(_("writing all SBs\n"));
+		if (update_rtsb(mp, NULL, argv[1]))
+			return 1;
 		for (ag = 0; ag < mp->m_sb.sb_agcount; ag++)
 			if ((p = do_label(ag, argv[1])) == NULL) {
 				dbprintf(_("failed to set label in AG %d\n"), ag);
@@ -710,6 +820,8 @@ version_string(
 		strcat(s, ",EXCHANGE");
 	if (xfs_has_parent(mp))
 		strcat(s, ",PARENT");
+	if (xfs_has_metadir(mp))
+		strcat(s, ",METADIR");
 	return s;
 }
 

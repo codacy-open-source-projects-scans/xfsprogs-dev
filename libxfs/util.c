@@ -179,78 +179,124 @@ libxfs_mod_incore_sb(
  */
 int
 libxfs_alloc_file_space(
-	xfs_inode_t	*ip,
-	xfs_off_t	offset,
-	xfs_off_t	len,
-	int		alloc_type,
-	int		attr_flags)
+	struct xfs_inode	*ip,
+	xfs_off_t		offset,
+	xfs_off_t		len,
+	uint32_t		bmapi_flags)
 {
-	xfs_mount_t	*mp;
-	xfs_off_t	count;
-	xfs_filblks_t	datablocks;
-	xfs_filblks_t	allocated_fsb;
-	xfs_filblks_t	allocatesize_fsb;
-	xfs_bmbt_irec_t *imapp;
-	xfs_bmbt_irec_t imaps[1];
-	int		reccount;
-	uint		resblks;
-	xfs_fileoff_t	startoffset_fsb;
-	xfs_trans_t	*tp;
-	int		xfs_bmapi_flags;
-	int		error;
+	xfs_mount_t		*mp = ip->i_mount;
+	xfs_off_t		count;
+	xfs_filblks_t		allocatesize_fsb;
+	xfs_extlen_t		extsz, temp;
+	xfs_fileoff_t		startoffset_fsb;
+	xfs_fileoff_t		endoffset_fsb;
+	int			rt;
+	xfs_trans_t		*tp;
+	xfs_bmbt_irec_t		imaps[1], *imapp;
+	int			error = 0;
 
 	if (len <= 0)
 		return -EINVAL;
 
+	rt = XFS_IS_REALTIME_INODE(ip);
+	extsz = xfs_get_extsz_hint(ip);
+
 	count = len;
-	error = 0;
 	imapp = &imaps[0];
-	reccount = 1;
-	xfs_bmapi_flags = alloc_type ? XFS_BMAPI_PREALLOC : 0;
-	mp = ip->i_mount;
-	startoffset_fsb = XFS_B_TO_FSBT(mp, offset);
-	allocatesize_fsb = XFS_B_TO_FSB(mp, count);
+	startoffset_fsb	= XFS_B_TO_FSBT(mp, offset);
+	endoffset_fsb = XFS_B_TO_FSB(mp, offset + count);
+	allocatesize_fsb = endoffset_fsb - startoffset_fsb;
 
-	/* allocate file space until done or until there is an error */
+	/*
+	 * Allocate file space until done or until there is an error
+	 */
 	while (allocatesize_fsb && !error) {
-		datablocks = allocatesize_fsb;
+		xfs_fileoff_t	s, e;
+		unsigned int	dblocks, rblocks, resblks;
+		int		nimaps = 1;
 
-		resblks = (uint)XFS_DIOSTRAT_SPACE_RES(mp, datablocks);
-		error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks,
-					0, 0, &tp);
 		/*
-		 * Check for running out of space
+		 * Determine space reservations for data/realtime.
 		 */
-		if (error) {
-			ASSERT(error == -ENOSPC);
-			break;
+		if (unlikely(extsz)) {
+			s = startoffset_fsb;
+			do_div(s, extsz);
+			s *= extsz;
+			e = startoffset_fsb + allocatesize_fsb;
+			div_u64_rem(startoffset_fsb, extsz, &temp);
+			if (temp)
+				e += temp;
+			div_u64_rem(e, extsz, &temp);
+			if (temp)
+				e += extsz - temp;
+		} else {
+			s = 0;
+			e = allocatesize_fsb;
 		}
-		xfs_trans_ijoin(tp, ip, 0);
-
-		error = xfs_bmapi_write(tp, ip, startoffset_fsb, allocatesize_fsb,
-				xfs_bmapi_flags, 0, imapp, &reccount);
-
-		if (error)
-			goto error0;
 
 		/*
-		 * Complete the transaction
+		 * The transaction reservation is limited to a 32-bit block
+		 * count, hence we need to limit the number of blocks we are
+		 * trying to reserve to avoid an overflow. We can't allocate
+		 * more than @nimaps extents, and an extent is limited on disk
+		 * to XFS_BMBT_MAX_EXTLEN (21 bits), so use that to enforce the
+		 * limit.
 		 */
-		error = xfs_trans_commit(tp);
+		resblks = min_t(xfs_fileoff_t, (e - s),
+				(XFS_MAX_BMBT_EXTLEN * nimaps));
+		if (unlikely(rt)) {
+			dblocks = XFS_DIOSTRAT_SPACE_RES(mp, 0);
+			rblocks = resblks;
+		} else {
+			dblocks = XFS_DIOSTRAT_SPACE_RES(mp, resblks);
+			rblocks = 0;
+		}
+
+		error = xfs_trans_alloc_inode(ip, &M_RES(mp)->tr_write,
+				dblocks, rblocks, false, &tp);
 		if (error)
 			break;
 
-		allocated_fsb = imapp->br_blockcount;
-		if (reccount == 0)
-			return -ENOSPC;
+		error = xfs_iext_count_extend(tp, ip, XFS_DATA_FORK,
+				XFS_IEXT_ADD_NOSPLIT_CNT);
+		if (error)
+			goto error;
 
-		startoffset_fsb += allocated_fsb;
-		allocatesize_fsb -= allocated_fsb;
+		error = xfs_bmapi_write(tp, ip, startoffset_fsb,
+				allocatesize_fsb, bmapi_flags, 0, imapp,
+				&nimaps);
+		if (error)
+			goto error;
+
+		ip->i_diflags |= XFS_DIFLAG_PREALLOC;
+		xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
+
+		error = xfs_trans_commit(tp);
+		xfs_iunlock(ip, XFS_ILOCK_EXCL);
+		if (error)
+			break;
+
+		/*
+		 * If xfs_bmapi_write finds a delalloc extent at the requested
+		 * range, it tries to convert the entire delalloc extent to a
+		 * real allocation.
+		 * If the allocator cannot find a single free extent large
+		 * enough to cover the start block of the requested range,
+		 * xfs_bmapi_write will return 0 but leave *nimaps set to 0.
+		 * In that case we simply need to keep looping with the same
+		 * startoffset_fsb.
+		 */
+		if (nimaps) {
+			startoffset_fsb += imapp->br_blockcount;
+			allocatesize_fsb -= imapp->br_blockcount;
+		}
 	}
+
 	return error;
 
-error0:	/* Cancel bmap, cancel trans */
+error:
 	xfs_trans_cancel(tp);
+	xfs_iunlock(ip, XFS_ILOCK_EXCL);
 	return error;
 }
 
@@ -387,7 +433,7 @@ static xfs_daddr_t
 xfs_fsb_to_db(struct xfs_inode *ip, xfs_fsblock_t fsb)
 {
 	if (XFS_IS_REALTIME_INODE(ip))
-		 return XFS_FSB_TO_BB(ip->i_mount, fsb);
+		 return xfs_rtb_to_daddr(ip->i_mount, fsb);
 	return XFS_FSB_TO_DADDR(ip->i_mount, (fsb));
 }
 
@@ -446,11 +492,18 @@ xfs_fs_mark_healthy(
 }
 
 void xfs_ag_geom_health(struct xfs_perag *pag, struct xfs_ag_geometry *ageo) { }
+void
+xfs_rtgroup_geom_health(
+	struct xfs_rtgroup		*rtg,
+	struct xfs_rtgroup_geometry	*rgeo)
+{
+	/* empty */
+}
 void xfs_fs_mark_sick(struct xfs_mount *mp, unsigned int mask) { }
 void xfs_agno_mark_sick(struct xfs_mount *mp, xfs_agnumber_t agno,
 		unsigned int mask) { }
-void xfs_ag_mark_sick(struct xfs_perag *pag, unsigned int mask) { }
-void xfs_ag_measure_sickness(struct xfs_perag *pag, unsigned int *sick,
+void xfs_group_mark_sick(struct xfs_group *xg, unsigned int mask) { }
+void xfs_group_measure_sickness(struct xfs_group *xg, unsigned int *sick,
 		unsigned int *checked)
 {
 	*sick = 0;
@@ -461,7 +514,6 @@ void xfs_btree_mark_sick(struct xfs_btree_cur *cur) { }
 void xfs_dirattr_mark_sick(struct xfs_inode *ip, int whichfork) { }
 void xfs_da_mark_sick(struct xfs_da_args *args) { }
 void xfs_inode_mark_sick(struct xfs_inode *ip, unsigned int mask) { }
-void xfs_rt_mark_sick(struct xfs_mount *mp, unsigned int mask) { }
 
 #ifdef HAVE_GETRANDOM_NONBLOCK
 uint32_t
@@ -481,3 +533,70 @@ get_random_u32(void)
 	return ret;
 }
 #endif
+
+/*
+ * Write a buffer to a file on the data device.  There must not be sparse holes
+ * or unwritten extents.
+ */
+int
+libxfs_file_write(
+	struct xfs_inode	*ip,
+	void			*buf,
+	off_t			pos,
+	size_t			len)
+{
+	struct xfs_bmbt_irec	map;
+	struct xfs_mount	*mp = ip->i_mount;
+	struct xfs_buf		*bp;
+	xfs_fileoff_t		bno = XFS_B_TO_FSBT(mp, pos);
+	xfs_fileoff_t		end_bno = XFS_B_TO_FSB(mp, pos + len);
+	unsigned int		block_off = pos % mp->m_sb.sb_blocksize;
+	size_t			count;
+	size_t			bcount;
+	int			nmap;
+	int			error = 0;
+
+	/* Write up to 1MB at a time. */
+	while (bno < end_bno) {
+		xfs_filblks_t	maplen;
+
+		maplen = min(end_bno - bno, XFS_B_TO_FSBT(mp, 1048576));
+		nmap = 1;
+		error = libxfs_bmapi_read(ip, bno, maplen, &map, &nmap, 0);
+		if (error)
+			return error;
+		if (nmap != 1)
+			return -ENOSPC;
+
+		if (map.br_startblock == HOLESTARTBLOCK ||
+		    map.br_state == XFS_EXT_UNWRITTEN)
+			return -EINVAL;
+
+		error = libxfs_buf_get(mp->m_dev,
+				XFS_FSB_TO_DADDR(mp, map.br_startblock),
+				XFS_FSB_TO_BB(mp, map.br_blockcount),
+				&bp);
+		if (error)
+			break;
+		bp->b_ops = NULL;
+
+		if (block_off > 0)
+			memset((char *)bp->b_addr, 0, block_off);
+		count = min(len, XFS_FSB_TO_B(mp, map.br_blockcount));
+		memmove(bp->b_addr, buf + block_off, count);
+		bcount = BBTOB(bp->b_length);
+		if (count < bcount)
+			memset((char *)bp->b_addr + block_off + count, 0,
+					bcount - (block_off + count));
+
+		libxfs_buf_mark_dirty(bp);
+		libxfs_buf_relse(bp);
+
+		buf += count;
+		len -= count;
+		bno += map.br_blockcount;
+		block_off = 0;
+	}
+
+	return error;
+}

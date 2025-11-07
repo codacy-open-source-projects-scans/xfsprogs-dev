@@ -12,21 +12,11 @@
 #include "input.h"
 #include "libfrog/convert.h"
 
-static int refc_maxrecs(struct xfs_mount *mp, int blocklen, int leaf)
-{
-	return libxfs_refcountbt_maxrecs(blocklen, leaf != 0);
-}
-
-static int rmap_maxrecs(struct xfs_mount *mp, int blocklen, int leaf)
-{
-	return libxfs_rmapbt_maxrecs(blocklen, leaf);
-}
-
 struct btmap {
 	const char	*tag;
 	unsigned int	(*maxlevels)(void);
-	int		(*maxrecs)(struct xfs_mount *mp, int blocklen,
-				   int leaf);
+	unsigned int	(*maxrecs)(struct xfs_mount *mp, unsigned int blocklen,
+				   bool leaf);
 } maps[] = {
 	{
 		.tag		= "bnobt",
@@ -56,12 +46,22 @@ struct btmap {
 	{
 		.tag		= "refcountbt",
 		.maxlevels	= libxfs_refcountbt_maxlevels_ondisk,
-		.maxrecs	= refc_maxrecs,
+		.maxrecs	= libxfs_refcountbt_maxrecs,
 	},
 	{
 		.tag		= "rmapbt",
 		.maxlevels	= libxfs_rmapbt_maxlevels_ondisk,
-		.maxrecs	= rmap_maxrecs,
+		.maxrecs	= libxfs_rmapbt_maxrecs,
+	},
+	{
+		.tag		= "rtrmapbt",
+		.maxlevels	= libxfs_rtrmapbt_maxlevels_ondisk,
+		.maxrecs	= libxfs_rtrmapbt_maxrecs,
+	},
+	{
+		.tag		= "rtrefcountbt",
+		.maxlevels	= libxfs_rtrefcountbt_maxlevels_ondisk,
+		.maxrecs	= libxfs_rtrefcountbt_maxrecs,
 	},
 };
 
@@ -153,6 +153,12 @@ construct_records_per_block(
 			records_per_block[1] = m->maxrecs(mp, blocksize, 0);
 			return 0;
 		}
+	}
+
+	p = strchr(tag, ':');
+	if (!p) {
+		fprintf(stderr, _("%s: expected a btree geometry specification.\n"), tag);
+		return -1;
 	}
 
 	toktag = strdup(tag);
@@ -263,6 +269,7 @@ out:
 #define REPORT_MAX	(1 << 0)
 #define REPORT_MIN	(1 << 1)
 #define REPORT_ABSMAX	(1 << 2)
+#define REPORT_AVG	(1 << 3)
 
 static void
 report_absmax(const char *tag)
@@ -315,6 +322,34 @@ _("%s: cannot calculate best case scenario due to node geometry underflow.\n"),
 
 		printf(
 _("%s: best case per %u-byte block: %u records (leaf) / %u keyptrs (node)\n"),
+				tag, blocksize, records_per_block[0],
+				records_per_block[1]);
+
+		calc_height(nr_records, records_per_block);
+	}
+
+	if (report_what & REPORT_AVG) {
+		records_per_block[0] *= 3;
+		records_per_block[0] /= 4;
+		records_per_block[1] *= 3;
+		records_per_block[1] /= 4;
+
+		if (records_per_block[0] < 2) {
+			fprintf(stderr,
+_("%s: cannot calculate average case scenario due to leaf geometry underflow.\n"),
+				tag);
+			return;
+		}
+
+		if (records_per_block[1] < 4) {
+			fprintf(stderr,
+_("%s: cannot calculate average case scenario due to node geometry underflow.\n"),
+				tag);
+			return;
+		}
+
+		printf(
+_("%s: average case per %u-byte block: %u records (leaf) / %u keyptrs (node)\n"),
 				tag, blocksize, records_per_block[0],
 				records_per_block[1]);
 
@@ -397,6 +432,8 @@ btheight_f(
 				report_what = REPORT_MAX;
 			else if (!strcmp(optarg, "absmax"))
 				report_what = REPORT_ABSMAX;
+			else if (!strcmp(optarg, "avg"))
+				report_what = REPORT_AVG;
 			else {
 				btheight_help();
 				return 0;

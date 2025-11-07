@@ -23,6 +23,7 @@
 #include "dir2.h"
 #include "dir2sf.h"
 #include "symlink.h"
+#include "rtgroup.h"
 
 #define	PPOFF(f)	bitize(offsetof(struct xfs_parent_rec, f))
 const field_t		parent_flds[] = {
@@ -50,6 +51,13 @@ const ftattr_t	ftattrtab[] = {
 	{ FLDT_AGINONN, "aginonn", fp_num, "%u", SI(bitsz(xfs_agino_t)),
 	  FTARG_SKIPNULL, fa_agino, NULL },
 	{ FLDT_AGNUMBER, "agnumber", fp_num, "%u", SI(bitsz(xfs_agnumber_t)),
+	  FTARG_DONULL, NULL, NULL },
+
+	{ FLDT_RGBLOCK, "rgblock", fp_num, "%u", SI(bitsz(xfs_rgblock_t)),
+	  FTARG_DONULL, NULL, NULL },
+	{ FLDT_RTXLEN, "rtxlen", fp_num, "%u", SI(bitsz(xfs_rtxlen_t)),
+	  FTARG_DONULL, NULL, NULL },
+	{ FLDT_RGNUMBER, "rgnumber", fp_num, "%u", SI(bitsz(xfs_rgnumber_t)),
 	  FTARG_DONULL, NULL, NULL },
 
 /* attr fields */
@@ -186,6 +194,17 @@ const ftattr_t	ftattrtab[] = {
 	{ FLDT_RMAPBTREC, "rmapbtrec", fp_sarray, (char *)rmapbt_rec_flds,
 	  SI(bitsz(struct xfs_rmap_rec)), 0, NULL, rmapbt_rec_flds },
 
+	{ FLDT_RTRMAPBT_CRC, "rtrmapbt", NULL, (char *)rtrmapbt_crc_flds, btblock_size,
+	  FTARG_SIZE, NULL, rtrmapbt_crc_flds },
+	{ FLDT_RTRMAPBTKEY, "rtrmapbtkey", fp_sarray, (char *)rtrmapbt_key_flds,
+	  SI(bitize(2 * sizeof(struct xfs_rmap_key))), 0, NULL, rtrmapbt_key_flds },
+	{ FLDT_RTRMAPBTPTR, "rtrmapbtptr", fp_num, "%llu",
+	  SI(bitsz(xfs_rtrmap_ptr_t)), 0, fa_dfsbno, NULL },
+	{ FLDT_RTRMAPBTREC, "rtrmapbtrec", fp_sarray, (char *)rtrmapbt_rec_flds,
+	  SI(bitsz(struct xfs_rmap_rec)), 0, NULL, rtrmapbt_rec_flds },
+	{ FLDT_RTRMAPROOT, "rtrmaproot", NULL, (char *)rtrmaproot_flds, rtrmaproot_size,
+	  FTARG_SIZE, NULL, rtrmaproot_flds },
+
 	{ FLDT_REFCBT_CRC, "refcntbt", NULL, (char *)refcbt_crc_flds, btblock_size,
 	  FTARG_SIZE, NULL, refcbt_crc_flds },
 	{ FLDT_REFCBTKEY, "refcntbtkey", fp_sarray, (char *)refcbt_key_flds,
@@ -194,6 +213,21 @@ const ftattr_t	ftattrtab[] = {
 	  0, fa_agblock, NULL },
 	{ FLDT_REFCBTREC, "refcntbtrec", fp_sarray, (char *)refcbt_rec_flds,
 	  SI(bitsz(struct xfs_refcount_rec)), 0, NULL, refcbt_rec_flds },
+
+	{ FLDT_CRGBLOCK, "crgblock", fp_num, "%u", SI(REFCNTBT_AGBLOCK_BITLEN),
+	  FTARG_DONULL, NULL, NULL },
+	{ FLDT_RTREFCBT_CRC, "rtrefcntbt", NULL, (char *)rtrefcbt_crc_flds,
+	  btblock_size, FTARG_SIZE, NULL, rtrefcbt_crc_flds },
+	{ FLDT_RTREFCBTKEY, "rtrefcntbtkey", fp_sarray,
+	  (char *)rtrefcbt_key_flds, SI(bitsz(struct xfs_refcount_key)), 0,
+	  NULL, rtrefcbt_key_flds },
+	{ FLDT_RTREFCBTPTR, "rtrefcntbtptr", fp_num, "%u",
+	  SI(bitsz(xfs_rtrefcount_ptr_t)), 0, fa_dfsbno, NULL },
+	{ FLDT_RTREFCBTREC, "rtrefcntbtrec", fp_sarray,
+	  (char *)rtrefcbt_rec_flds, SI(bitsz(struct xfs_refcount_rec)), 0,
+	  NULL, rtrefcbt_rec_flds },
+	{ FLDT_RTREFCROOT, "rtrefcroot", NULL, (char *)rtrefcroot_flds,
+	  rtrefcroot_size, FTARG_SIZE, NULL, rtrefcroot_flds },
 
 /* CRC field */
 	{ FLDT_CRC, "crc", fp_crc, "%#x (%s)", SI(bitsz(uint32_t)),
@@ -212,6 +246,8 @@ const ftattr_t	ftattrtab[] = {
 	  SI(bitsz(struct xfs_dinode)), 0, NULL, inode_core_flds },
 	{ FLDT_DINODE_FMT, "dinode_fmt", fp_dinode_fmt, NULL,
 	  SI(bitsz(int8_t)), 0, NULL, NULL },
+	{ FLDT_DINODE_METATYPE, "metatype", fp_metatype, NULL,
+	  SI(bitsz(uint16_t)), 0, NULL, NULL },
 	{ FLDT_DINODE_U, "dinode_u", NULL, (char *)inode_u_flds, inode_u_size,
 	  FTARG_SIZE|FTARG_OKEMPTY, NULL, inode_u_flds },
 	{ FLDT_DINODE_V3, "dinode_v3", NULL, (char *)inode_v3_flds,
@@ -355,6 +391,8 @@ const ftattr_t	ftattrtab[] = {
 	  NULL, NULL },
 	{ FLDT_SB, "sb", NULL, (char *)sb_flds, sb_size, FTARG_SIZE, NULL,
 	  sb_flds },
+	{ FLDT_RTSB, "rtsb", NULL, (char *)rtsb_flds, rtsb_size, FTARG_SIZE,
+	  NULL, rtsb_flds },
 
 /* CRC enabled symlink */
 	{ FLDT_SYMLINK_CRC, "symlink", NULL, (char *)symlink_crc_flds,
@@ -394,6 +432,16 @@ const ftattr_t	ftattrtab[] = {
 	{ FLDT_UUID, "uuid", fp_uuid, NULL, SI(bitsz(uuid_t)), 0, NULL, NULL },
 	{ FLDT_PARENT_REC, "parent", NULL, (char *)parent_flds,
 	  SI(bitsz(struct xfs_parent_rec)), 0, NULL, parent_flds },
+
+	{ FLDT_RTWORD, "rtword", fp_num, "%#x", SI(bitsz(xfs_rtword_t)),
+	  0, NULL, NULL },
+	{ FLDT_RGBITMAP, "rgbitmap", NULL, (char *)rgbitmap_flds, btblock_size,
+	  FTARG_SIZE, NULL, rgbitmap_flds },
+	{ FLDT_SUMINFO, "suminfo", fp_num, "%u", SI(bitsz(xfs_suminfo_t)),
+	  0, NULL, NULL },
+	{ FLDT_RGSUMMARY, "rgsummary", NULL, (char *)rgsummary_flds,
+	  btblock_size, FTARG_SIZE, NULL, rgsummary_flds },
+
 	{ FLDT_ZZZ, NULL }
 };
 

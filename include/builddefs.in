@@ -14,6 +14,7 @@ MALLOCLIB = @malloc_lib@
 LOADERFLAGS = @LDFLAGS@
 LTLDFLAGS = @LDFLAGS@
 CFLAGS = @CFLAGS@ -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64 -Wno-address-of-packed-member
+CXXFLAGS = @CXXFLAGS@ -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64 -Wno-address-of-packed-member
 BUILD_CFLAGS = @BUILD_CFLAGS@ -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64
 
 # make sure we don't pick up whacky LDFLAGS from the make environment and
@@ -41,6 +42,7 @@ PKG_GROUP	= @pkg_group@
 PKG_RELEASE	= @pkg_release@
 PKG_VERSION	= @pkg_version@
 PKG_DISTRIBUTION= @pkg_distribution@
+PKG_BUGREPORT	= @PACKAGE_BUGREPORT@
 
 prefix		= @prefix@
 exec_prefix	= @exec_prefix@
@@ -63,6 +65,7 @@ XFS_SCRUB_ALL_AUTO_MEDIA_SCAN_STAMP=$(PKG_STATE_DIR)/xfs_scrub_all_media.stamp
 
 CC		= @cc@
 BUILD_CC	= @BUILD_CC@
+CXX		= @cxx@
 AWK		= @awk@
 SED		= @sed@
 TAR		= @tar@
@@ -93,9 +96,12 @@ HAVE_ZIPPED_MANPAGES = @have_zipped_manpages@
 
 HAVE_PWRITEV2 = @have_pwritev2@
 HAVE_COPY_FILE_RANGE = @have_copy_file_range@
+HAVE_CACHESTAT = @have_cachestat@
+HAVE_FILE_GETATTR = @have_file_getattr@
 NEED_INTERNAL_FSXATTR = @need_internal_fsxattr@
 NEED_INTERNAL_FSCRYPT_ADD_KEY_ARG = @need_internal_fscrypt_add_key_arg@
 NEED_INTERNAL_FSCRYPT_POLICY_V2 = @need_internal_fscrypt_policy_v2@
+NEED_INTERNAL_STATX = @need_internal_statx@
 HAVE_GETFSMAP = @have_getfsmap@
 HAVE_MAP_SYNC = @have_map_sync@
 HAVE_DEVMAPPER = @have_devmapper@
@@ -111,6 +117,7 @@ CROND_DIR = @crond_dir@
 HAVE_UDEV = @have_udev@
 UDEV_RULE_DIR = @udev_rule_dir@
 HAVE_LIBURCU_ATOMIC64 = @have_liburcu_atomic64@
+STRERROR_R_RETURNS_STRING = @strerror_r_returns_string@
 
 GCCFLAGS = -funsigned-char -fno-strict-aliasing -Wall
 #	   -Wbitwise -Wno-transparent-union -Wno-old-initializer -Wno-decl
@@ -130,6 +137,9 @@ endif
 ifeq ($(NEED_INTERNAL_FSCRYPT_POLICY_V2),yes)
 PCFLAGS+= -DOVERRIDE_SYSTEM_FSCRYPT_POLICY_V2
 endif
+ifeq ($(NEED_INTERNAL_STATX),yes)
+PCFLAGS+= -DOVERRIDE_SYSTEM_STATX
+endif
 ifeq ($(HAVE_GETFSMAP),yes)
 PCFLAGS+= -DHAVE_GETFSMAP
 endif
@@ -140,7 +150,7 @@ ifeq ($(HAVE_LIBURCU_ATOMIC64),yes)
 PCFLAGS += -DHAVE_LIBURCU_ATOMIC64
 endif
 
-SANITIZER_CFLAGS += @addrsan_cflags@ @threadsan_cflags@ @ubsan_cflags@
+SANITIZER_CFLAGS += @addrsan_cflags@ @threadsan_cflags@ @ubsan_cflags@ @autovar_init_cflags@
 SANITIZER_LDFLAGS += @addrsan_ldflags@ @threadsan_ldflags@ @ubsan_ldflags@
 
 # Use special ar/ranlib wrappers if we have lto
@@ -161,9 +171,19 @@ ifeq ($(ENABLE_GETTEXT),yes)
 GCFLAGS += -DENABLE_GETTEXT
 endif
 
+ifeq ($(HAVE_FILE_GETATTR),yes)
+LCFLAGS += -DHAVE_FILE_GETATTR
+endif
+
+# Override these if C++ needs other options
+SANITIZER_CXXFLAGS = $(SANITIZER_CFLAGS)
+GCXXFLAGS = $(GCFLAGS)
+PCXXFLAGS = $(PCFLAGS)
+
 BUILD_CFLAGS += $(GCFLAGS) $(PCFLAGS)
 # First, Sanitizer, Global, Platform, Local CFLAGS
 CFLAGS += $(FCFLAGS) $(SANITIZER_CFLAGS) $(OPTIMIZER) $(GCFLAGS) $(PCFLAGS) $(LCFLAGS)
+CXXFLAGS += $(FCXXFLAGS) $(SANITIZER_CXXFLAGS) $(OPTIMIZER) $(GCXXFLAGS) $(PCXXFLAGS) $(LCXXFLAGS)
 
 include $(TOPDIR)/include/buildmacros
 

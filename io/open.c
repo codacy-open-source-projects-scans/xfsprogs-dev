@@ -338,14 +338,19 @@ open_f(
 	return 0;
 }
 
-static int
-close_f(
-	int		argc,
-	char		**argv)
+int
+closefile(void)
 {
 	size_t		length;
 	unsigned int	offset;
 
+	if (file->flags & IO_ATOMICUPDATE) {
+		fprintf(stderr,
+	_("%s: atomic update in progress, cannot close.\n"),
+			file->name);
+		exitcode = 1;
+		return 0;
+	}
 	if (close(file->fd) < 0) {
 		perror("close");
 		exitcode = 1;
@@ -371,7 +376,19 @@ close_f(
 		free(filetable);
 		file = filetable = NULL;
 	}
-	filelist_f();
+	return 0;
+}
+
+static int
+close_f(
+	int		argc,
+	char		**argv)
+{
+	int		ret;
+
+	ret = closefile();
+	if (!ret)
+		filelist_f();
 	return 0;
 }
 
@@ -980,7 +997,7 @@ open_init(void)
 	extsize_cmd.args = _("[-D | -R] [extsize]");
 	extsize_cmd.argmin = 0;
 	extsize_cmd.argmax = -1;
-	extsize_cmd.flags = CMD_NOMAP_OK;
+	extsize_cmd.flags = CMD_NOMAP_OK | CMD_FOREIGN_OK;
 	extsize_cmd.oneline =
 		_("get/set preferred extent size (in bytes) for the open file");
 	extsize_cmd.help = extsize_help;

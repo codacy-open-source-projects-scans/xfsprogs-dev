@@ -210,27 +210,40 @@ static inline struct timespec64 inode_set_ctime_current(struct inode *inode)
 	return now;
 }
 
+static inline bool inode_wrong_type(const struct inode *inode, umode_t mode)
+{
+	return (inode->i_mode ^ mode) & S_IFMT;
+}
+
 typedef struct xfs_inode {
 	struct cache_node	i_node;
 	struct xfs_mount	*i_mount;	/* fs mount struct ptr */
 	xfs_ino_t		i_ino;		/* inode number (agno/agino) */
 	struct xfs_imap		i_imap;		/* location for xfs_imap() */
-	struct xfs_buftarg	i_dev;		/* dev for this inode */
 	struct xfs_ifork	*i_cowfp;	/* copy on write extents */
 	struct xfs_ifork	i_df;		/* data fork */
 	struct xfs_ifork	i_af;		/* attribute fork */
 	struct xfs_inode_log_item *i_itemp;	/* logging information */
-	unsigned int		i_delayed_blks;	/* count of delay alloc blks */
+	uint64_t		i_delayed_blks;	/* count of delay alloc blks */
+	/* Space that has been set aside to root a btree in this file. */
+	uint64_t		i_meta_resv_asked;
+
 	xfs_fsize_t		i_disk_size;	/* number of bytes in file */
 	xfs_rfsblock_t		i_nblocks;	/* # of direct & btree blocks */
 	prid_t			i_projid;	/* owner's project id */
 	xfs_extlen_t		i_extsize;	/* basic/minimum extent size */
-	/* cowextsize is only used for v3 inodes, flushiter for v1/2 */
+	/*
+	 * i_used_blocks is used for zoned rtrmap inodes,
+	 * i_cowextsize is used for other v3 inodes,
+	 * i_flushiter for v1/2 inodes
+	 */
 	union {
+		uint32_t	i_used_blocks;	/* used blocks in RTG */
 		xfs_extlen_t	i_cowextsize;	/* basic cow extent size */
 		uint16_t	i_flushiter;	/* incremented on flush */
 	};
 	uint8_t			i_forkoff;	/* attr fork offset >> 3 */
+	enum xfs_metafile_type	i_metatype;	/* XFS_METAFILE_* */
 	uint16_t		i_diflags;	/* XFS_DIFLAG_... */
 	uint64_t		i_diflags2;	/* XFS_DIFLAG2_... */
 	struct timespec64	i_crtime;	/* time created */
@@ -239,14 +252,11 @@ typedef struct xfs_inode {
 	xfs_agino_t		i_next_unlinked;
 	xfs_agino_t		i_prev_unlinked;
 
-	xfs_extnum_t		i_cnextents;	/* # of extents in cow fork */
-	unsigned int		i_cformat;	/* format of cow fork */
-
 	xfs_fsize_t		i_size;		/* in-memory size */
 	struct inode		i_vnode;
 } xfs_inode_t;
 
-static inline bool xfs_inode_has_attr_fork(struct xfs_inode *ip)
+static inline bool xfs_inode_has_attr_fork(const struct xfs_inode *ip)
 {
 	return ip->i_forkoff > 0;
 }
@@ -356,6 +366,11 @@ static inline xfs_fsize_t XFS_ISIZE(struct xfs_inode *ip)
 }
 #define XFS_IS_REALTIME_INODE(ip) ((ip)->i_diflags & XFS_DIFLAG_REALTIME)
 
+static inline bool xfs_is_zoned_inode(struct xfs_inode *ip)
+{
+	return xfs_has_zoned(ip->i_mount) && XFS_IS_REALTIME_INODE(ip);
+}
+
 /* inode link counts */
 static inline void set_nlink(struct inode *inode, uint32_t nlink)
 {
@@ -370,17 +385,17 @@ static inline void drop_nlink(struct inode *inode)
 	inode->i_nlink--;
 }
 
-static inline bool xfs_is_reflink_inode(struct xfs_inode *ip)
+static inline bool xfs_is_reflink_inode(const struct xfs_inode *ip)
 {
 	return ip->i_diflags2 & XFS_DIFLAG2_REFLINK;
 }
 
-static inline bool xfs_inode_has_bigtime(struct xfs_inode *ip)
+static inline bool xfs_inode_has_bigtime(const struct xfs_inode *ip)
 {
 	return ip->i_diflags2 & XFS_DIFLAG2_BIGTIME;
 }
 
-static inline bool xfs_inode_has_large_extent_counts(struct xfs_inode *ip)
+static inline bool xfs_inode_has_large_extent_counts(const struct xfs_inode *ip)
 {
 	return ip->i_diflags2 & XFS_DIFLAG2_NREXT64;
 }
@@ -390,14 +405,19 @@ static inline bool xfs_inode_has_large_extent_counts(struct xfs_inode *ip)
  * Decide if this file is a realtime file whose data allocation unit is larger
  * than a single filesystem block.
  */
-static inline bool xfs_inode_has_bigrtalloc(struct xfs_inode *ip)
+static inline bool xfs_inode_has_bigrtalloc(const struct xfs_inode *ip)
 {
 	return XFS_IS_REALTIME_INODE(ip) && ip->i_mount->m_sb.sb_rextsize > 1;
 }
 
-static inline bool xfs_is_always_cow_inode(struct xfs_inode *ip)
+static inline bool xfs_is_always_cow_inode(const struct xfs_inode *ip)
 {
 	return false;
+}
+
+static inline bool xfs_is_metadir_inode(const struct xfs_inode *ip)
+{
+	return ip->i_diflags2 & XFS_DIFLAG2_METADATA;
 }
 
 extern void	libxfs_trans_inode_alloc_buf (struct xfs_trans *,

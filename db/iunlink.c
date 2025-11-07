@@ -117,7 +117,7 @@ dump_unlinked(
 	bool			verbose)
 {
 	struct xfs_buf		*agi_bp;
-	xfs_agnumber_t		agno = pag->pag_agno;
+	xfs_agnumber_t		agno = pag_agno(pag);
 	int			error;
 
 	error = -libxfs_ialloc_read_agi(pag, NULL, 0, &agi_bp);
@@ -144,7 +144,7 @@ dump_iunlinked_f(
 	int			argc,
 	char			**argv)
 {
-	struct xfs_perag	*pag;
+	struct xfs_perag	*pag = NULL;
 	xfs_agnumber_t		agno = NULLAGNUMBER;
 	unsigned int		bucket = -1U;
 	bool			quiet = false;
@@ -189,7 +189,7 @@ dump_iunlinked_f(
 		return 0;
 	}
 
-	for_each_perag(mp, agno, pag)
+	while ((pag = xfs_perag_next(mp, pag)))
 		dump_unlinked(pag, bucket, quiet, verbose);
 
 	return 0;
@@ -223,7 +223,7 @@ create_unlinked(
 		return error;
 	}
 
-	error = -libxfs_dialloc(&tp, 0, args.mode, &ino);
+	error = -libxfs_dialloc(&tp, &args, &ino);
 	if (error) {
 		dbprintf(_("alloc inode: %s\n"), strerror(error));
 		goto out_cancel;

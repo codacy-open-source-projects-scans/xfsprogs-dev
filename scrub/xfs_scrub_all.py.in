@@ -7,6 +7,7 @@
 
 # Run online scrubbers in parallel, but avoid thrashing.
 
+@INIT_GETTEXT@
 import subprocess
 import json
 import threading
@@ -115,7 +116,7 @@ class scrub_subprocess(scrub_control):
 		global debug
 
 		if debug:
-			print('run ', ' '.join(self.cmdline))
+			print(_('run '), ' '.join(self.cmdline))
 
 		try:
 			self.proc = subprocess.Popen(self.cmdline)
@@ -132,7 +133,7 @@ class scrub_subprocess(scrub_control):
 		global debug
 
 		if debug:
-			print('kill ', ' '.join(self.cmdline))
+			print(_('kill '), ' '.join(self.cmdline))
 		if self.proc is not None:
 			self.proc.terminate()
 
@@ -249,6 +250,56 @@ class scrub_service(scrub_control):
 				print(e, file = sys.stderr)
 			return 'failed'
 
+	def last_activation(self):
+		'''Retrieve the last activation time, in microseconds since
+		boot.'''
+		global debug
+
+		l = lambda: self.prop.Get('org.freedesktop.systemd1.Unit',
+				'InactiveExitTimestampMonotonic')
+		try:
+			return self.__dbusrun(l)
+		except Exception as e:
+			if debug:
+				print(e, file = sys.stderr)
+			return 0
+
+	def wait_for_startup(self, last_active, wait_for = 30, interval = 0.5):
+		'''Wait for the service to start up.  This is defined as
+		exiting the inactive state.'''
+
+		for i in range(0, int(wait_for / interval)):
+			s = self.state()
+			if debug:
+				msg = _("waiting for activation")
+				print(f'{msg} {self.unitname} {s}')
+			if s == 'failed':
+				return 1
+			if s != 'inactive':
+				return 0
+			# If the unit is inactive but the last activation time
+			# doesn't match, then the service ran so quickly that
+			# it's already gone.
+			if last_active != self.last_activation():
+				return 0
+			time.sleep(interval)
+
+		s = self.state()
+		if debug:
+			msg = _('waited for startup')
+			print(f'{msg} {self.unitname} {s}')
+		if s == 'failed':
+			return 1
+		if s != 'inactive':
+			return 0
+
+		# If the unit is inactive but the last activation time doesn't
+		# match, then the service ran so quickly that it's already
+		# gone.
+		if last_active != self.last_activation():
+			return 0
+		return 2
+
 	def wait(self, interval = 1):
 		'''Wait until the service finishes.'''
 		global debug
@@ -259,11 +310,13 @@ class scrub_service(scrub_control):
 		s = self.state()
 		while s not in ['failed', 'inactive']:
 			if debug:
-				print('waiting %s %s' % (self.unitname, s))
+				msg = _("waiting for")
+				print(f'{msg} {self.unitname} {s}')
 			time.sleep(interval)
 			s = self.state()
 		if debug:
-			print('waited %s %s' % (self.unitname, s))
+			msg = _('waited for')
+			print(f'{msg} {self.unitname} {s}')
 		if s == 'failed':
 			return 1
 		return 0
@@ -275,10 +328,15 @@ class scrub_service(scrub_control):
 		global debug
 
 		if debug:
-			print('starting %s' % self.unitname)
+			msg = _("starting")
+			print(f'{msg} {self.unitname}')
 
 		try:
+			last_active = self.last_activation()
 			self.__dbusrun(lambda: self.unit.Start('replace'))
+			ret = self.wait_for_startup(last_active)
+			if ret > 0:
+				return ret
 			return self.wait()
 		except dbus.exceptions.DBusException as e:
 			# If the unit was masked, the sysadmin doesn't want us
@@ -296,7 +354,8 @@ class scrub_service(scrub_control):
 		global debug
 
 		if debug:
-			print('stopping %s' % self.unitname)
+			msg = _('stopping')
+			print(f'{msg} {self.unitname}')
 
 		try:
 			self.__dbusrun(lambda: self.unit.Stop('replace'))
@@ -335,11 +394,13 @@ def run_scrub(mnt, cond, running_devs, mntdevs, killfuncs):
 		if 'SERVICE_MODE' in os.environ:
 			ret = run_service(mnt, scrub_media, killfuncs)
 			if ret == 32:
-				print("Scrubbing %s disabled by administrator, (err=%d)" % (mnt, ret))
+				msg = _("Scrubbing disabled by administrator")
+				print(f"{mnt}: {msg}, (err={ret})")
 				sys.stdout.flush()
 				return
 			if ret == 0 or ret == 1:
-				print("Scrubbing %s done, (err=%d)" % (mnt, ret))
+				msg = _("Scrubbing done")
+				print(f"{mnt}: {msg}, (err={ret})")
 				sys.stdout.flush()
 				retcode |= ret
 				return
@@ -352,7 +413,8 @@ def run_scrub(mnt, cond, running_devs, mntdevs, killfuncs):
 		# systemd services are unavailable.
 		ret = run_subprocess(mnt, scrub_media, killfuncs)
 		if ret >= 0:
-			print("Scrubbing %s done, (err=%d)" % (mnt, ret))
+			msg = _("Scrubbing done")
+			print(f"{mnt}: {msg}, (err={ret})")
 			sys.stdout.flush()
 			retcode |= ret
 			return
@@ -360,7 +422,7 @@ def run_scrub(mnt, cond, running_devs, mntdevs, killfuncs):
 		if terminate:
 			return
 
-		print("Unable to start scrub tool.")
+		print(_("Unable to start scrub tool."))
 		sys.stdout.flush()
 	finally:
 		running_devs -= mntdevs
@@ -374,7 +436,7 @@ def signal_scrubs(signum, cond):
 	global terminate
 
 	if debug:
-		print('Signal handler called with signal', signum)
+		print(_('Signal handler called with signal'), signum)
 		sys.stdout.flush()
 
 	terminate = True
@@ -389,7 +451,7 @@ def wait_for_termination(cond, killfuncs):
 	global terminate
 
 	if debug:
-		print('waiting for threads to terminate')
+		print(_('waiting for threads to terminate'))
 		sys.stdout.flush()
 
 	cond.acquire()
@@ -402,7 +464,7 @@ def wait_for_termination(cond, killfuncs):
 	if not terminate:
 		return False
 
-	print("Terminating...")
+	print(_("Terminating..."))
 	sys.stdout.flush()
 	while len(killfuncs) > 0:
 		fn = killfuncs.pop()
@@ -431,12 +493,6 @@ def scan_interval(string):
 		return timedelta(seconds = float(string[:-1]))
 	return timedelta(seconds = int(string))
 
-def utcnow():
-	'''Create a representation of the time right now, in UTC.'''
-
-	dt = datetime.utcnow()
-	return dt.replace(tzinfo = timezone.utc)
-
 def enable_automatic_media_scan(args):
 	'''Decide if we enable media scanning automatically.'''
 	already_enabled = args.x
@@ -444,8 +500,8 @@ def enable_automatic_media_scan(args):
 	try:
 		interval = scan_interval(args.auto_media_scan_interval)
 	except Exception as e:
-		raise Exception('%s: Invalid media scan interval.' % \
-				args.auto_media_scan_interval)
+		msg = _("Invalid media scan interval.")
+		raise Exception(f'{args.auto_media_scan_interval}: {msg}')
 
 	p = Path(args.auto_media_scan_stamp)
 	if already_enabled:
@@ -453,7 +509,7 @@ def enable_automatic_media_scan(args):
 	else:
 		try:
 			last_run = p.stat().st_mtime
-			now = utcnow().timestamp()
+			now = datetime.now(timezone.utc).timestamp()
 			res = last_run + interval.total_seconds() < now
 		except FileNotFoundError:
 			res = True
@@ -463,7 +519,7 @@ def enable_automatic_media_scan(args):
 		with p.open('w') as f:
 			pass
 		if not already_enabled:
-			print('Automatically enabling file data scrub.')
+			print(_('Automatically enabling file data scrub.'))
 			sys.stdout.flush()
 
 	return res
@@ -480,21 +536,23 @@ def main():
 	global debug
 
 	parser = argparse.ArgumentParser( \
-			description = "Scrub all mounted XFS filesystems.")
-	parser.add_argument("--debug", help = "Enabling debugging messages.", \
+			description = _("Scrub all mounted XFS filesystems."))
+	parser.add_argument("--debug", help = _("Enabling debugging messages."), \
 			action = "store_true")
-	parser.add_argument("-V", help = "Report version and exit.", \
+	parser.add_argument("-V", help = _("Report version and exit."), \
 			action = "store_true")
-	parser.add_argument("-x", help = "Scrub file data after filesystem metadata.", \
+	parser.add_argument("-x", help = _("Scrub file data after filesystem metadata."), \
 			action = "store_true")
-	parser.add_argument("--auto-media-scan-interval", help = "Automatically scrub file data at this interval.", \
+	parser.add_argument("--auto-media-scan-interval", help = _("Automatically scrub file data at this interval."), \
 			default = None)
-	parser.add_argument("--auto-media-scan-stamp", help = "Stamp file for automatic file data scrub.", \
+	parser.add_argument("--auto-media-scan-stamp", help = _("Stamp file for automatic file data scrub."), \
 			default = '@stampfile@')
 	args = parser.parse_args()
 
 	if args.V:
-		print("xfs_scrub_all version @pkg_version@")
+		msg = _("xfs_scrub_all version")
+		pkgver = "@pkg_version@"
+		print(f"{msg} {pkgver}")
 		sys.exit(0)
 
 	if args.debug:

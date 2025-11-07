@@ -5,10 +5,14 @@
 #ifndef __LIBFROG_FSGEOM_H__
 #define __LIBFROG_FSGEOM_H__
 
+struct xfs_rtgroup_geometry;
+
 void xfs_report_geom(struct xfs_fsop_geom *geo, const char *mntpoint,
 		const char *logname, const char *rtname);
 int xfrog_geometry(int fd, struct xfs_fsop_geom *fsgeo);
 int xfrog_ag_geometry(int fd, unsigned int agno, struct xfs_ag_geometry *ageo);
+int xfrog_rtgroup_geometry(int fd, unsigned int rgno,
+		struct xfs_rtgroup_geometry *rgeo);
 
 /*
  * Structure for recording whatever observations we want about the level of
@@ -199,6 +203,18 @@ cvt_b_to_agbno(
 	uint64_t		byteno)
 {
 	return cvt_daddr_to_agbno(xfd, cvt_btobbt(byteno));
+}
+
+/* Return the number of bytes in an rtgroup. */
+static inline uint64_t
+bytes_per_rtgroup(
+	const struct xfs_fsop_geom	*fsgeo)
+{
+	if (!fsgeo->rgcount)
+		return 0;
+
+	return (uint64_t)fsgeo->rgextents * fsgeo->rtextsize *
+		fsgeo->blocksize;
 }
 
 #endif /* __LIBFROG_FSGEOM_H__ */

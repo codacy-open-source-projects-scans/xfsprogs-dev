@@ -67,6 +67,7 @@ xlog_print_trans_efi(
 	uint			src_len,
 	int			continued)
 {
+	const char		*item_name = "EFI?";
 	xfs_efi_log_format_t	*src_f, *f = NULL;
 	uint			dst_len;
 	xfs_extent_t		*ex;
@@ -103,8 +104,14 @@ xlog_print_trans_efi(
 		goto error;
 	}
 
-	printf(_("EFI:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
-		f->efi_size, f->efi_nextents, (unsigned long long)f->efi_id);
+	switch (f->efi_type) {
+	case XFS_LI_EFI:	item_name = "EFI"; break;
+	case XFS_LI_EFI_RT:	item_name = "EFI_RT"; break;
+	}
+
+	printf(_("%s:  #regs: %d	num_extents: %u  id: 0x%llx\n"),
+			item_name, f->efi_size, f->efi_nextents,
+			(unsigned long long)f->efi_id);
 
 	if (continued) {
 		printf(_("EFI free extent data skipped (CONTINUE set, no space)\n"));
@@ -113,7 +120,7 @@ xlog_print_trans_efi(
 
 	ex = f->efi_extents;
 	for (i=0; i < f->efi_nextents; i++) {
-		printf("(s: 0x%llx, l: %d) ",
+		printf("(s: 0x%llx, l: %u) ",
 			(unsigned long long)ex->ext_start, ex->ext_len);
 		if (i % 4 == 3) printf("\n");
 		ex++;
@@ -130,13 +137,14 @@ void
 xlog_recover_print_efi(
 	struct xlog_recover_item *item)
 {
+	const char		*item_name = "EFI?";
 	xfs_efi_log_format_t	*f, *src_f;
 	xfs_extent_t		*ex;
 	int			i;
 	uint			src_len, dst_len;
 
-	src_f = (xfs_efi_log_format_t *)item->ri_buf[0].i_addr;
-	src_len = item->ri_buf[0].i_len;
+	src_f = (xfs_efi_log_format_t *)item->ri_buf[0].iov_base;
+	src_len = item->ri_buf[0].iov_len;
 	/*
 	 * An xfs_efi_log_format structure contains a variable length array
 	 * as the last field.
@@ -155,12 +163,18 @@ xlog_recover_print_efi(
 		return;
 	}
 
-	printf(_("	EFI:  #regs:%d	num_extents:%d  id:0x%llx\n"),
-		   f->efi_size, f->efi_nextents, (unsigned long long)f->efi_id);
+	switch (f->efi_type) {
+	case XFS_LI_EFI:	item_name = "EFI"; break;
+	case XFS_LI_EFI_RT:	item_name = "EFI_RT"; break;
+	}
+
+	printf(_("	%s:  #regs:%d	num_extents:%u  id:0x%llx\n"),
+			item_name, f->efi_size, f->efi_nextents,
+			(unsigned long long)f->efi_id);
 	ex = f->efi_extents;
 	printf("	");
 	for (i=0; i< f->efi_nextents; i++) {
-		printf("(s: 0x%llx, l: %d) ",
+		printf("(s: 0x%llx, l: %u) ",
 			(unsigned long long)ex->ext_start, ex->ext_len);
 		if (i % 4 == 3)
 			printf("\n");
@@ -174,8 +188,10 @@ xlog_recover_print_efi(
 int
 xlog_print_trans_efd(char **ptr, uint len)
 {
-	xfs_efd_log_format_t *f;
-	xfs_efd_log_format_t lbuf;
+	const char		*item_name = "EFD?";
+	xfs_efd_log_format_t	*f;
+	xfs_efd_log_format_t	lbuf;
+
 	/* size without extents at end */
 	uint core_size = sizeof(xfs_efd_log_format_t);
 
@@ -185,11 +201,17 @@ xlog_print_trans_efd(char **ptr, uint len)
 	 */
 	memmove(&lbuf, *ptr, min(core_size, len));
 	f = &lbuf;
+
+	switch (f->efd_type) {
+	case XFS_LI_EFD:	item_name = "EFD"; break;
+	case XFS_LI_EFD_RT:	item_name = "EFD_RT"; break;
+	}
+
 	*ptr += len;
 	if (len >= core_size) {
-		printf(_("EFD:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
-			f->efd_size, f->efd_nextents,
-			(unsigned long long)f->efd_efi_id);
+		printf(_("%s:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
+				item_name, f->efd_size, f->efd_nextents,
+				(unsigned long long)f->efd_efi_id);
 
 		/* don't print extents as they are not used */
 
@@ -204,18 +226,25 @@ void
 xlog_recover_print_efd(
 	struct xlog_recover_item *item)
 {
+	const char		*item_name = "EFD?";
 	xfs_efd_log_format_t	*f;
 
-	f = (xfs_efd_log_format_t *)item->ri_buf[0].i_addr;
+	f = (xfs_efd_log_format_t *)item->ri_buf[0].iov_base;
+
+	switch (f->efd_type) {
+	case XFS_LI_EFD:	item_name = "EFD"; break;
+	case XFS_LI_EFD_RT:	item_name = "EFD_RT"; break;
+	}
+
 	/*
 	 * An xfs_efd_log_format structure contains a variable length array
 	 * as the last field.
 	 * Each element is of size xfs_extent_32_t or xfs_extent_64_t.
 	 * However, the extents are never used and won't be printed.
 	 */
-	printf(_("	EFD:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
-		f->efd_size, f->efd_nextents,
-		(unsigned long long)f->efd_efi_id);
+	printf(_("	%s:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
+			item_name, f->efd_size, f->efd_nextents,
+			(unsigned long long)f->efd_efi_id);
 }
 
 /* Reverse Mapping Update Items */
@@ -245,6 +274,7 @@ xlog_print_trans_rui(
 	uint			src_len,
 	int			continued)
 {
+	const char		*item_name = "RUI?";
 	struct xfs_rui_log_format	*src_f, *f = NULL;
 	uint			dst_len;
 	uint			nextents;
@@ -289,8 +319,14 @@ xlog_print_trans_rui(
 		goto error;
 	}
 
-	printf(_("RUI:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
-		f->rui_size, f->rui_nextents, (unsigned long long)f->rui_id);
+	switch (f->rui_type) {
+	case XFS_LI_RUI:	item_name = "RUI"; break;
+	case XFS_LI_RUI_RT:	item_name = "RUI_RT"; break;
+	}
+
+	printf(_("%s:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
+			item_name, f->rui_size, f->rui_nextents,
+			(unsigned long long)f->rui_id);
 
 	if (continued) {
 		printf(_("RUI extent data skipped (CONTINUE set, no space)\n"));
@@ -319,8 +355,8 @@ xlog_recover_print_rui(
 	char				*src_f;
 	uint				src_len;
 
-	src_f = item->ri_buf[0].i_addr;
-	src_len = item->ri_buf[0].i_len;
+	src_f = item->ri_buf[0].iov_base;
+	src_len = item->ri_buf[0].iov_len;
 
 	xlog_print_trans_rui(&src_f, src_len, 0);
 }
@@ -330,6 +366,7 @@ xlog_print_trans_rud(
 	char				**ptr,
 	uint				len)
 {
+	const char			*item_name = "RUD?";
 	struct xfs_rud_log_format	*f;
 	struct xfs_rud_log_format	lbuf;
 
@@ -342,11 +379,17 @@ xlog_print_trans_rud(
 	 */
 	memmove(&lbuf, *ptr, min(core_size, len));
 	f = &lbuf;
+
+	switch (f->rud_type) {
+	case XFS_LI_RUD:	item_name = "RUD"; break;
+	case XFS_LI_RUD_RT:	item_name = "RUD_RT"; break;
+	}
+
 	*ptr += len;
 	if (len >= core_size) {
-		printf(_("RUD:  #regs: %d	                 id: 0x%llx\n"),
-			f->rud_size,
-			(unsigned long long)f->rud_rui_id);
+		printf(_("%s:  #regs: %d	                 id: 0x%llx\n"),
+				item_name, f->rud_size,
+				(unsigned long long)f->rud_rui_id);
 
 		/* don't print extents as they are not used */
 
@@ -363,7 +406,7 @@ xlog_recover_print_rud(
 {
 	char				*f;
 
-	f = item->ri_buf[0].i_addr;
+	f = item->ri_buf[0].iov_base;
 	xlog_print_trans_rud(&f, sizeof(struct xfs_rud_log_format));
 }
 
@@ -397,6 +440,7 @@ xlog_print_trans_cui(
 	uint			src_len,
 	int			continued)
 {
+	const char		*item_name = "CUI?";
 	struct xfs_cui_log_format	*src_f, *f = NULL;
 	uint			dst_len;
 	uint			nextents;
@@ -437,8 +481,14 @@ xlog_print_trans_cui(
 		goto error;
 	}
 
-	printf(_("CUI:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
-		f->cui_size, f->cui_nextents, (unsigned long long)f->cui_id);
+	switch (f->cui_type) {
+	case XFS_LI_CUI:	item_name = "CUI"; break;
+	case XFS_LI_CUI_RT:	item_name = "CUI_RT"; break;
+	}
+
+	printf(_("%s:  #regs: %d	num_extents: %d  id: 0x%llx\n"),
+			item_name, f->cui_size, f->cui_nextents,
+			(unsigned long long)f->cui_id);
 
 	if (continued) {
 		printf(_("CUI extent data skipped (CONTINUE set, no space)\n"));
@@ -466,8 +516,8 @@ xlog_recover_print_cui(
 	char				*src_f;
 	uint				src_len;
 
-	src_f = item->ri_buf[0].i_addr;
-	src_len = item->ri_buf[0].i_len;
+	src_f = item->ri_buf[0].iov_base;
+	src_len = item->ri_buf[0].iov_len;
 
 	xlog_print_trans_cui(&src_f, src_len, 0);
 }
@@ -477,6 +527,7 @@ xlog_print_trans_cud(
 	char				**ptr,
 	uint				len)
 {
+	const char			*item_name = "CUD?";
 	struct xfs_cud_log_format	*f;
 	struct xfs_cud_log_format	lbuf;
 
@@ -485,11 +536,17 @@ xlog_print_trans_cud(
 
 	memcpy(&lbuf, *ptr, min(core_size, len));
 	f = &lbuf;
+
+	switch (f->cud_type) {
+	case XFS_LI_CUD:	item_name = "CUD"; break;
+	case XFS_LI_CUD_RT:	item_name = "CUD_RT"; break;
+	}
+
 	*ptr += len;
 	if (len >= core_size) {
-		printf(_("CUD:  #regs: %d	                 id: 0x%llx\n"),
-			f->cud_size,
-			(unsigned long long)f->cud_cui_id);
+		printf(_("%s:  #regs: %d	                 id: 0x%llx\n"),
+				item_name, f->cud_size,
+				(unsigned long long)f->cud_cui_id);
 
 		/* don't print extents as they are not used */
 
@@ -506,7 +563,7 @@ xlog_recover_print_cud(
 {
 	char				*f;
 
-	f = item->ri_buf[0].i_addr;
+	f = item->ri_buf[0].iov_base;
 	xlog_print_trans_cud(&f, sizeof(struct xfs_cud_log_format));
 }
 
@@ -610,8 +667,8 @@ xlog_recover_print_bui(
 	char				*src_f;
 	uint				src_len;
 
-	src_f = item->ri_buf[0].i_addr;
-	src_len = item->ri_buf[0].i_len;
+	src_f = item->ri_buf[0].iov_base;
+	src_len = item->ri_buf[0].iov_len;
 
 	xlog_print_trans_bui(&src_f, src_len, 0);
 }
@@ -650,7 +707,7 @@ xlog_recover_print_bud(
 {
 	char				*f;
 
-	f = item->ri_buf[0].i_addr;
+	f = item->ri_buf[0].iov_base;
 	xlog_print_trans_bud(&f, sizeof(struct xfs_bud_log_format));
 }
 
@@ -897,8 +954,8 @@ xlog_recover_print_attri(
 	unsigned int			new_value_len = 0;
 	int				region = 0;
 
-	src_f = (struct xfs_attri_log_format *)item->ri_buf[0].i_addr;
-	src_len = item->ri_buf[region].i_len;
+	src_f = (struct xfs_attri_log_format *)item->ri_buf[0].iov_base;
+	src_len = item->ri_buf[region].iov_len;
 
 	/*
 	 * An xfs_attri_log_format structure contains a attribute name and
@@ -939,17 +996,17 @@ xlog_recover_print_attri(
 	if (name_len > 0) {
 		region++;
 		printf(_("ATTRI:  name len:%u\n"), name_len);
-		print_or_dump((char *)item->ri_buf[region].i_addr,
+		print_or_dump((char *)item->ri_buf[region].iov_base,
 			       name_len);
-		name_ptr = item->ri_buf[region].i_addr;
+		name_ptr = item->ri_buf[region].iov_base;
 	}
 
 	if (new_name_len > 0) {
 		region++;
 		printf(_("ATTRI:  newname len:%u\n"), new_name_len);
-		print_or_dump((char *)item->ri_buf[region].i_addr,
+		print_or_dump((char *)item->ri_buf[region].iov_base,
 			       new_name_len);
-		new_name_ptr = item->ri_buf[region].i_addr;
+		new_name_ptr = item->ri_buf[region].iov_base;
 	}
 
 	if (value_len > 0) {
@@ -957,8 +1014,8 @@ xlog_recover_print_attri(
 
 		region++;
 		printf(_("ATTRI:  value len:%u\n"), value_len);
-		print_or_dump((char *)item->ri_buf[region].i_addr, len);
-		value_ptr = item->ri_buf[region].i_addr;
+		print_or_dump((char *)item->ri_buf[region].iov_base, len);
+		value_ptr = item->ri_buf[region].iov_base;
 	}
 
 	if (new_value_len > 0) {
@@ -966,8 +1023,8 @@ xlog_recover_print_attri(
 
 		region++;
 		printf(_("ATTRI:  newvalue len:%u\n"), new_value_len);
-		print_or_dump((char *)item->ri_buf[region].i_addr, len);
-		new_value_ptr = item->ri_buf[region].i_addr;
+		print_or_dump((char *)item->ri_buf[region].iov_base, len);
+		new_value_ptr = item->ri_buf[region].iov_base;
 	}
 
 	if (src_f->alfi_attr_filter & XFS_ATTR_PARENT)
@@ -1008,7 +1065,7 @@ xlog_recover_print_attrd(
 {
 	struct xfs_attrd_log_format	*f;
 
-	f = (struct xfs_attrd_log_format *)item->ri_buf[0].i_addr;
+	f = (struct xfs_attrd_log_format *)item->ri_buf[0].iov_base;
 
 	printf(_("	ATTRD:  #regs: %d	id: 0x%llx\n"),
 		f->alfd_size,
@@ -1099,8 +1156,8 @@ xlog_recover_print_xmi(
 	char				*src_f;
 	uint				src_len;
 
-	src_f = item->ri_buf[0].i_addr;
-	src_len = item->ri_buf[0].i_len;
+	src_f = item->ri_buf[0].iov_base;
+	src_len = item->ri_buf[0].iov_len;
 
 	xlog_print_trans_xmi(&src_f, src_len, 0);
 }
@@ -1139,6 +1196,6 @@ xlog_recover_print_xmd(
 {
 	char				*f;
 
-	f = item->ri_buf[0].i_addr;
+	f = item->ri_buf[0].iov_base;
 	xlog_print_trans_xmd(&f, sizeof(struct xfs_xmd_log_format));
 }

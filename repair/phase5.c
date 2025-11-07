@@ -21,6 +21,7 @@
 #include "rmap.h"
 #include "bulkload.h"
 #include "agbtree.h"
+#include "zoned.h"
 
 static uint64_t	*sb_icount_ag;		/* allocated inodes per ag */
 static uint64_t	*sb_ifree_ag;		/* free inodes per ag */
@@ -72,7 +73,7 @@ mk_incore_fstree(
 	 * largest extent.
 	 */
 	for (agbno = 0; agbno < ag_end; agbno += blen) {
-		bstate = get_bmap_ext(agno, agbno, ag_end, &blen);
+		bstate = get_bmap_ext(agno, agbno, ag_end, &blen, false);
 		if (bstate < XR_E_INUSE)  {
 			free_blocks += blen;
 			if (in_extent == 0)  {
@@ -419,13 +420,18 @@ static void
 keep_fsinos(xfs_mount_t *mp)
 {
 	ino_tree_node_t		*irec;
-	int			i;
+	unsigned int		inuse = xfs_rootrec_inodes_inuse(mp), i;
 
 	irec = find_inode_rec(mp, XFS_INO_TO_AGNO(mp, mp->m_sb.sb_rootino),
 			XFS_INO_TO_AGINO(mp, mp->m_sb.sb_rootino));
 
-	for (i = 0; i < 3; i++)
+	for (i = 0; i < inuse; i++) {
 		set_inode_used(irec, i);
+
+		/* Everything after the root dir is metadata */
+		if (i)
+			set_inode_is_meta(irec, i);
+	}
 }
 
 static void
@@ -441,7 +447,7 @@ phase5_func(
 	struct bt_rebuild	btr_fino;
 	struct bt_rebuild	btr_rmap;
 	struct bt_rebuild	btr_refc;
-	xfs_agnumber_t		agno = pag->pag_agno;
+	xfs_agnumber_t		agno = pag_agno(pag);
 	int			extra_blocks = 0;
 	uint			num_freeblocks;
 	xfs_agblock_t		num_extents;
@@ -476,11 +482,14 @@ _("unable to rebuild AG %u.  Not enough free space in on-disk AG.\n"),
 
 	/*
 	 * Estimate the number of free blocks in this AG after rebuilding
-	 * all btrees.
+	 * all btrees, unless we already decided that we need to pack all
+	 * btree blocks maximally.
 	 */
-	total_btblocks = estimate_agbtree_blocks(pag, num_extents);
-	if (num_freeblocks > total_btblocks)
-		est_agfreeblocks = num_freeblocks - total_btblocks;
+	if (!need_packed_btrees) {
+		total_btblocks = estimate_agbtree_blocks(pag, num_extents);
+		if (num_freeblocks > total_btblocks)
+			est_agfreeblocks = num_freeblocks - total_btblocks;
+	}
 
 	init_ino_cursors(&sc, pag, est_agfreeblocks, &sb_icount_ag[agno],
 			&sb_ifree_ag[agno], &btr_ino, &btr_fino);
@@ -622,17 +631,124 @@ void
 check_rtmetadata(
 	struct xfs_mount	*mp)
 {
-	rtinit(mp);
-	generate_rtinfo(mp, btmcompute, sumcompute);
+	if (xfs_has_zoned(mp)) {
+		check_zones(mp);
+		return;
+	}
+
+	generate_rtinfo(mp);
 	check_rtbitmap(mp);
 	check_rtsummary(mp);
+}
+
+/*
+ * Estimate the amount of free space used by the perag metadata without
+ * building the incore tree.  This is only necessary if realtime btrees are
+ * enabled.
+ */
+static xfs_extlen_t
+estimate_agbtree_blocks_early(
+	struct xfs_perag	*pag,
+	unsigned int		*num_freeblocks)
+{
+	struct xfs_mount	*mp = pag_mount(pag);
+	xfs_agblock_t		agbno;
+	xfs_agblock_t		ag_end;
+	xfs_extlen_t		extent_len;
+	xfs_extlen_t		blen;
+	unsigned int		num_extents = 0;
+	int			bstate;
+	bool			in_extent = false;
+
+	/* Find the number of free space extents. */
+	ag_end = libxfs_ag_block_count(mp, pag_agno(pag));
+	for (agbno = 0; agbno < ag_end; agbno += blen) {
+		bstate = get_bmap_ext(pag_agno(pag), agbno, ag_end, &blen,
+				false);
+		if (bstate < XR_E_INUSE)  {
+			if (!in_extent) {
+				/*
+				 * found the start of a free extent
+				 */
+				in_extent = true;
+				num_extents++;
+				extent_len = blen;
+			} else {
+				extent_len += blen;
+			}
+		} else {
+			if (in_extent)  {
+				/*
+				 * free extent ends here
+				 */
+				in_extent = false;
+				*num_freeblocks += extent_len;
+			}
+		}
+	}
+	if (in_extent)
+		*num_freeblocks += extent_len;
+
+	return estimate_agbtree_blocks(pag, num_extents);
+}
+
+/*
+ * Decide if we need to pack every new btree block completely full to conserve
+ * disk space.  Normally we rebuild btree blocks to be 75% full, but we don't
+ * want to start rebuilding AG btrees that way only to discover that there
+ * isn't enough space left in the data volume to rebuild inode-based btrees.
+ */
+static bool
+are_packed_btrees_needed(
+	struct xfs_mount	*mp)
+{
+	struct xfs_perag	*pag = NULL;
+	struct xfs_rtgroup	*rtg = NULL;
+	unsigned long long	metadata_blocks = 0;
+	unsigned long long	fdblocks = 0;
+
+	/*
+	 * If we don't have inode-based metadata, we can let the AG btrees
+	 * pack as needed; there are no global space concerns here.
+	 */
+	if (!xfs_has_rtrmapbt(mp) && !xfs_has_rtreflink(mp))
+		return false;
+
+	while ((pag = xfs_perag_next(mp, pag))) {
+		unsigned int	ag_fdblocks = 0;
+
+		metadata_blocks += estimate_agbtree_blocks_early(pag,
+								 &ag_fdblocks);
+		fdblocks += ag_fdblocks;
+	}
+
+	while ((rtg = xfs_rtgroup_next(mp, rtg))) {
+		metadata_blocks += estimate_rtrmapbt_blocks(rtg);
+		metadata_blocks += estimate_rtrefcountbt_blocks(rtg);
+	}
+
+	/*
+	 * If we think we'll have more metadata blocks than free space, then
+	 * pack the btree blocks.
+	 */
+	if (metadata_blocks > fdblocks)
+		return true;
+
+	/*
+	 * If the amount of free space after building btrees is less than 9%
+	 * of the data volume, pack the btree blocks.
+	 */
+	fdblocks -= metadata_blocks;
+	if (fdblocks < ((mp->m_sb.sb_dblocks * 3) >> 5))
+		return true;
+	return false;
 }
 
 void
 phase5(xfs_mount_t *mp)
 {
 	struct bitmap		*lost_blocks = NULL;
-	struct xfs_perag	*pag;
+	struct xfs_perag	*pag = NULL;
 	xfs_agnumber_t		agno;
 	int			error;
 
@@ -641,21 +757,21 @@ phase5(xfs_mount_t *mp)
 
 #ifdef XR_BLD_FREE_TRACE
 	fprintf(stderr, "inobt level 1, maxrec = %d, minrec = %d\n",
-		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, 0),
-		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, 0) / 2);
+		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, false),
+		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, false) / 2);
 	fprintf(stderr, "inobt level 0 (leaf), maxrec = %d, minrec = %d\n",
-		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, 1),
-		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, 1) / 2);
+		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, true),
+		libxfs_inobt_maxrecs(mp, mp->m_sb.sb_blocksize, true) / 2);
 	fprintf(stderr, "xr inobt level 0 (leaf), maxrec = %d\n",
 		XR_INOBT_BLOCK_MAXRECS(mp, 0));
 	fprintf(stderr, "xr inobt level 1 (int), maxrec = %d\n",
 		XR_INOBT_BLOCK_MAXRECS(mp, 1));
 	fprintf(stderr, "bnobt level 1, maxrec = %d, minrec = %d\n",
-		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, 0),
-		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, 0) / 2);
+		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, false),
+		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, false) / 2);
 	fprintf(stderr, "bnobt level 0 (leaf), maxrec = %d, minrec = %d\n",
-		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, 1),
-		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, 1) / 2);
+		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, true),
+		libxfs_allocbt_maxrecs(mp, mp->m_sb.sb_blocksize, true) / 2);
 #endif
 	/*
 	 * make sure the root and realtime inodes show up allocated
@@ -679,7 +795,9 @@ phase5(xfs_mount_t *mp)
 	if (error)
 		do_error(_("cannot alloc lost block bitmap\n"));
 
-	for_each_perag(mp, agno, pag)
+	need_packed_btrees = are_packed_btrees_needed(mp);
+
+	while ((pag = xfs_perag_next(mp, pag)))
 		phase5_func(mp, pag, lost_blocks);
 
 	print_final_rpt();
@@ -693,12 +811,6 @@ phase5(xfs_mount_t *mp)
 	free(sb_icount_ag);
 	free(sb_ifree_ag);
 	free(sb_fdblocks_ag);
-
-	if (mp->m_sb.sb_rblocks)  {
-		do_log(
-		_("        - generate realtime summary info and bitmap...\n"));
-		check_rtmetadata(mp);
-	}
 
 	do_log(_("        - reset superblock...\n"));
 

@@ -74,11 +74,10 @@ bulkload_add_extent(
 	xfs_agblock_t		agbno,
 	xfs_extlen_t		len)
 {
-	struct xfs_mount	*mp = bkl->sc->mp;
 	struct xfs_alloc_arg	args = {
 		.tp		= NULL, /* no autoreap */
 		.oinfo		= bkl->oinfo,
-		.fsbno		= XFS_AGB_TO_FSB(mp, pag->pag_agno, agbno),
+		.fsbno		= xfs_agbno_to_fsb(pag, agbno),
 		.len		= len,
 		.resv		= XFS_AG_RESV_NONE,
 	};
@@ -194,7 +193,7 @@ free:
 	 * Use EFIs to free the reservations.  We don't need to use EFIs here
 	 * like the kernel, but we'll do it to keep the code matched.
 	 */
-	fsbno = XFS_AGB_TO_FSB(sc->mp, resv->pag->pag_agno, free_agbno);
+	fsbno = xfs_agbno_to_fsb(resv->pag, free_agbno);
 	error = -libxfs_free_extent_later(sc->tp, fsbno, free_aglen,
 			&bkl->oinfo, XFS_AG_RESV_NONE,
 			XFS_FREE_EXTENT_SKIP_DISCARD);
@@ -290,7 +289,6 @@ bulkload_claim_block(
 	union xfs_btree_ptr	*ptr)
 {
 	struct bulkload_resv	*resv;
-	struct xfs_mount	*mp = cur->bc_mp;
 	xfs_agblock_t		agbno;
 
 	/*
@@ -316,8 +314,7 @@ bulkload_claim_block(
 		list_move_tail(&resv->list, &bkl->resv_list);
 
 	if (cur->bc_ops->ptr_len == XFS_BTREE_LONG_PTR_LEN)
-		ptr->l = cpu_to_be64(XFS_AGB_TO_FSB(mp, resv->pag->pag_agno,
-								agbno));
+		ptr->l = cpu_to_be64(xfs_agbno_to_fsb(resv->pag, agbno));
 	else
 		ptr->s = cpu_to_be32(agbno);
 	return 0;
@@ -352,6 +349,47 @@ bulkload_estimate_ag_slack(
 
 	/* No further changes if there's more than 10% space left. */
 	if (free >= sc->mp->m_sb.sb_agblocks / 10)
+		return;
+
+	/*
+	 * We're low on space; load the btrees as tightly as possible.  Leave
+	 * a couple of open slots in each btree block so that we don't end up
+	 * splitting the btrees like crazy right after mount.
+	 */
+	if (bload->leaf_slack < 0)
+		bload->leaf_slack = 2;
+	if (bload->node_slack < 0)
+		bload->node_slack = 2;
+}
+
+/*
+ * Estimate proper slack values for a btree that's being reloaded.
+ *
+ * Under most circumstances, we'll take whatever default loading value the
+ * btree bulk loading code calculates for us.  However, there are some
+ * exceptions to this rule:
+ *
+ * (1) If someone turned one of the debug knobs.
+ * (2) The FS has less than ~9% space free.
+ *
+ * Note that we actually use 3/32 for the comparison to avoid division.
+ */
+void
+bulkload_estimate_inode_slack(
+	struct xfs_mount	*mp,
+	struct xfs_btree_bload	*bload,
+	unsigned long long	free)
+{
+	/*
+	 * The global values are set to -1 (i.e. take the bload defaults)
+	 * unless someone has set them otherwise, so we just pull the values
+	 * here.
+	 */
+	bload->leaf_slack = bload_leaf_slack;
+	bload->node_slack = bload_node_slack;
+
+	/* No further changes if there's more than 3/32ths space left. */
+	if (free >= ((mp->m_sb.sb_dblocks * 3) >> 5))
 		return;
 
 	/*

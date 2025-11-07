@@ -116,7 +116,7 @@ qc_rec_get(
 	pthread_mutex_lock(&dquots->lock);
 	node = avl64_find(&dquots->tree, id);
 	if (!node && can_alloc) {
-		qrec = calloc(sizeof(struct qc_rec), 1);
+		qrec = calloc(1, sizeof(struct qc_rec));
 		if (qrec) {
 			qrec->id = id;
 			node = avl64_insert(&dquots->tree, &qrec->node);
@@ -203,9 +203,7 @@ quotacheck_adjust(
 		return;
 
 	/* Quota files are not included in quota counts. */
-	if (ino == mp->m_sb.sb_uquotino ||
-	    ino == mp->m_sb.sb_gquotino ||
-	    ino == mp->m_sb.sb_pquotino)
+	if (is_any_quota_inode(ino))
 		return;
 
 	error = -libxfs_iget(mp, NULL, ino, 0, &ip);
@@ -216,6 +214,10 @@ quotacheck_adjust(
 		chkd_flags = 0;
 		return;
 	}
+
+	/* Metadata directory files aren't counted in quota. */
+	if (xfs_is_metadir_inode(ip))
+		goto out_rele;
 
 	/* Count the file's blocks. */
 	if (XFS_IS_REALTIME_INODE(ip))
@@ -229,6 +231,7 @@ quotacheck_adjust(
 	if (proj_dquots)
 		qc_adjust(proj_dquots, ip->i_projid, blocks, rtblks);
 
+out_rele:
 	libxfs_irele(ip);
 }
 
@@ -403,22 +406,27 @@ quotacheck_verify(
 	struct xfs_ifork	*ifp;
 	struct qc_dquots	*dquots = NULL;
 	struct avl64node	*node, *n;
+	struct xfs_trans	*tp;
 	xfs_ino_t		ino = NULLFSINO;
+	enum xfs_metafile_type	metafile_type;
 	int			error;
 
 	switch (type) {
 	case XFS_DQTYPE_USER:
-		ino = mp->m_sb.sb_uquotino;
 		dquots = user_dquots;
+		metafile_type = XFS_METAFILE_USRQUOTA;
 		break;
 	case XFS_DQTYPE_GROUP:
-		ino = mp->m_sb.sb_gquotino;
 		dquots = group_dquots;
+		metafile_type = XFS_METAFILE_GRPQUOTA;
 		break;
 	case XFS_DQTYPE_PROJ:
-		ino = mp->m_sb.sb_pquotino;
 		dquots = proj_dquots;
+		metafile_type = XFS_METAFILE_PRJQUOTA;
 		break;
+	default:
+		ASSERT(0);
+		return;
 	}
 
 	/*
@@ -429,17 +437,20 @@ quotacheck_verify(
 	if (!dquots || !chkd_flags)
 		return;
 
-	error = -libxfs_iget(mp, NULL, ino, 0, &ip);
+	tp = libxfs_trans_alloc_empty(mp);
+
+	ino = get_quota_inode(type);
+	error = -libxfs_trans_metafile_iget(tp, ino, metafile_type, &ip);
 	if (error) {
 		do_warn(
 	_("could not open %s inode %"PRIu64" for quotacheck, err=%d\n"),
 			qflags_typestr(type), ino, error);
 		chkd_flags = 0;
-		return;
+		goto out_trans;
 	}
 
 	ifp = xfs_ifork_ptr(ip, XFS_DATA_FORK);
-	error = -libxfs_iread_extents(NULL, ip, XFS_DATA_FORK);
+	error = -libxfs_iread_extents(tp, ip, XFS_DATA_FORK);
 	if (error) {
 		do_warn(
 	_("could not read %s inode %"PRIu64" extents, err=%d\n"),
@@ -477,6 +488,8 @@ _("%s record for id %u not found on disk (bcount %"PRIu64" rtbcount %"PRIu64" ic
 	}
 err:
 	libxfs_irele(ip);
+out_trans:
+	libxfs_trans_cancel(tp);
 }
 
 /*
@@ -489,34 +502,28 @@ qc_has_quotafile(
 	struct xfs_mount	*mp,
 	xfs_dqtype_t		type)
 {
-	bool			lost;
 	xfs_ino_t		ino;
 	unsigned int		qflag;
 
 	switch (type) {
 	case XFS_DQTYPE_USER:
-		lost = lost_uquotino;
-		ino = mp->m_sb.sb_uquotino;
 		qflag = XFS_UQUOTA_CHKD;
 		break;
 	case XFS_DQTYPE_GROUP:
-		lost = lost_gquotino;
-		ino = mp->m_sb.sb_gquotino;
 		qflag = XFS_GQUOTA_CHKD;
 		break;
 	case XFS_DQTYPE_PROJ:
-		lost = lost_pquotino;
-		ino = mp->m_sb.sb_pquotino;
 		qflag = XFS_PQUOTA_CHKD;
 		break;
 	default:
 		return false;
 	}
 
-	if (lost)
+	if (lost_quota_inode(type))
 		return false;
 	if (!(mp->m_sb.sb_qflags & qflag))
 		return false;
+	ino = get_quota_inode(type);
 	if (ino == NULLFSINO || ino == 0)
 		return false;
 	return true;
@@ -609,4 +616,98 @@ quotacheck_teardown(void)
 	qc_purge(&user_dquots);
 	qc_purge(&group_dquots);
 	qc_purge(&proj_dquots);
+}
+
+void
+update_sb_quotinos(
+	struct xfs_mount	*mp,
+	struct xfs_buf		*sbp)
+{
+	bool			dirty = false;
+
+	if (mp->m_sb.sb_uquotino != get_quota_inode(XFS_DQTYPE_USER)) {
+		mp->m_sb.sb_uquotino = get_quota_inode(XFS_DQTYPE_USER);
+		dirty = true;
+	}
+
+	if (mp->m_sb.sb_gquotino != get_quota_inode(XFS_DQTYPE_GROUP)) {
+		mp->m_sb.sb_gquotino = get_quota_inode(XFS_DQTYPE_GROUP);
+		dirty = true;
+	}
+
+	if (mp->m_sb.sb_pquotino != get_quota_inode(XFS_DQTYPE_PROJ)) {
+		mp->m_sb.sb_pquotino = get_quota_inode(XFS_DQTYPE_PROJ);
+		dirty = true;
+	}
+
+	if (dirty)
+		libxfs_sb_to_disk(sbp->b_addr, &mp->m_sb);
+}
+
+static inline int
+mark_quota_inode(
+	struct xfs_trans	*tp,
+	struct xfs_inode	*dp,
+	xfs_dqtype_t		type)
+{
+	struct xfs_inode	*ip;
+	int			error;
+
+	error = -libxfs_dqinode_load(tp, dp, type, &ip);
+	if (error == ENOENT)
+		return 0;
+	if (error)
+		goto out_corrupt;
+
+	set_quota_inode(type, ip->i_ino);
+	libxfs_irele(ip);
+	return 0;
+
+out_corrupt:
+	lose_quota_inode(type);
+	return error;
+}
+
+/* Mark the reachable quota metadata inodes prior to the inode scan. */
+void
+discover_quota_inodes(
+	struct xfs_mount	*mp)
+{
+	struct xfs_trans	*tp;
+	struct xfs_inode	*dp = NULL;
+	int			error, err2;
+
+	tp = libxfs_trans_alloc_empty(mp);
+
+	error = -libxfs_dqinode_load_parent(tp, &dp);
+	if (error)
+		goto out_cancel;
+
+	error = mark_quota_inode(tp, dp, XFS_DQTYPE_USER);
+	err2 = mark_quota_inode(tp, dp, XFS_DQTYPE_GROUP);
+	if (err2 && !error)
+		error = err2;
+	err2 = mark_quota_inode(tp, dp, XFS_DQTYPE_PROJ);
+	if (err2 && !error)
+		error = err2;
+
+	libxfs_irele(dp);
+out_cancel:
+	libxfs_trans_cancel(tp);
+	if (error) {
+		switch (error) {
+		case EFSCORRUPTED:
+			do_warn(
+ _("corruption in metadata directory tree while discovering quota inodes\n"));
+			break;
+		case ENOENT:
+			/* Do nothing, we'll just clear qflags later. */
+			break;
+		default:
+			do_warn(
+ _("couldn't discover quota inodes, err %d\n"),
+						error);
+			break;
+		}
+	}
 }

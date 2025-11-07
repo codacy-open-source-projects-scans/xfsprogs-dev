@@ -27,6 +27,7 @@
 #include "bulkload.h"
 #include "quotacheck.h"
 #include "rcbag_btree.h"
+#include "rt.h"
 
 /*
  * option tables for getsubopt calls
@@ -546,9 +547,15 @@ has_plausible_rootdir(
 	int			error;
 	bool			ret = false;
 
+	if (xfs_has_metadir(mp) &&
+	    mp->m_sb.sb_rootino == mp->m_sb.sb_metadirino)
+		goto out;
+
 	error = -libxfs_iget(mp, NULL, mp->m_sb.sb_rootino, 0, &ip);
 	if (error)
 		goto out;
+	if (xfs_is_metadir_inode(ip))
+		goto out_rele;
 	if (!S_ISDIR(VFS_I(ip)->i_mode))
 		goto out_rele;
 
@@ -645,6 +652,46 @@ fix:
 }
 
 /*
+ * Check that the metadata directory inode comes immediately after the root
+ * directory inode and that it seems to look like a metadata directory.
+ */
+STATIC void
+check_metadir_inode(
+	struct xfs_mount	*mp,
+	xfs_ino_t		rootino)
+{
+	int			error;
+
+	validate_sb_ino(&mp->m_sb.sb_metadirino, rootino + 1,
+			_("metadata root directory"));
+
+	/* If we changed the metadir inode, try reloading it. */
+	if (!mp->m_metadirip ||
+	    mp->m_metadirip->i_ino != mp->m_sb.sb_metadirino) {
+		if (mp->m_metadirip)
+			libxfs_irele(mp->m_metadirip);
+
+		error = -libxfs_metafile_iget(mp, mp->m_sb.sb_metadirino,
+				XFS_METAFILE_DIR, &mp->m_metadirip);
+		if (error) {
+			need_metadir_inode = true;
+			goto done;
+		}
+	}
+
+done:
+	if (need_metadir_inode) {
+		if (!no_modify)
+			do_warn(_("will reset metadata root directory\n"));
+		else
+			do_warn(_("would reset metadata root directory\n"));
+		if (mp->m_metadirip)
+			libxfs_irele(mp->m_metadirip);
+		mp->m_metadirip = NULL;
+	}
+}
+
+/*
  * Make sure that the first 3 inodes in the filesystem are the root directory,
  * the realtime bitmap, and the realtime summary, in that order.
  */
@@ -673,10 +720,22 @@ _("sb root inode value %" PRIu64 " valid but in unaligned location (expected %"P
 
 	validate_sb_ino(&mp->m_sb.sb_rootino, rootino,
 			_("root"));
-	validate_sb_ino(&mp->m_sb.sb_rbmino, rootino + 1,
-			_("realtime bitmap"));
-	validate_sb_ino(&mp->m_sb.sb_rsumino, rootino + 2,
-			_("realtime summary"));
+
+	if (xfs_has_metadir(mp)) {
+		/*
+		 * The metadata root directory comes after the regular root
+		 * directory.
+		 */
+		check_metadir_inode(mp, rootino);
+		rootino++;
+	}
+
+	if (!xfs_has_rtgroups(mp)) {
+		validate_sb_ino(&mp->m_sb.sb_rbmino, rootino + 1,
+				_("realtime bitmap"));
+		validate_sb_ino(&mp->m_sb.sb_rsumino, rootino + 2,
+				_("realtime summary"));
+	}
 }
 
 /*
@@ -1289,6 +1348,7 @@ main(int argc, char **argv)
 	incore_ino_init(mp);
 	incore_ext_init(mp);
 	rmaps_init(mp);
+	init_rtgroup_inodes();
 
 	/* initialize random globals now that we know the fs geometry */
 	inodes_per_block = mp->m_sb.sb_inopblock;
@@ -1318,9 +1378,6 @@ main(int argc, char **argv)
 
 	if (no_modify) {
 		printf(_("No modify flag set, skipping phase 5\n"));
-
-		if (mp->m_sb.sb_rblocks > 0)
-			check_rtmetadata(mp);
 	} else {
 		phase5(mp);
 	}
@@ -1328,23 +1385,35 @@ main(int argc, char **argv)
 	rcbagbt_destroy_cur_cache();
 
 	/*
-	 * Done with the block usage maps, toss them...
+	 * Done with the block usage maps, toss them.  Realtime metadata aren't
+	 * rebuilt until phase 6, so we have to keep them around.
 	 */
-	rmaps_free(mp);
-	free_bmaps(mp);
+	if (mp->m_sb.sb_rblocks == 0) {
+		rmaps_free(mp);
+		free_bmaps(mp);
+	}
 
 	if (!bad_ino_btree)  {
 		phase6(mp);
 		phase_end(mp, 6);
+
+		if (mp->m_sb.sb_rblocks != 0) {
+			rmaps_free(mp);
+			free_bmaps(mp);
+		}
+		free_rtgroup_inodes();
 
 		phase7(mp, phase2_threads);
 		phase_end(mp, 7);
 	} else  {
 		do_warn(
 _("Inode allocation btrees are too corrupted, skipping phases 6 and 7\n"));
+		free_rtgroup_inodes();
 	}
 
-	if (lost_quotas && !have_uquotino && !have_gquotino && !have_pquotino) {
+	if (lost_quotas && !has_quota_inode(XFS_DQTYPE_USER) &&
+	    !has_quota_inode(XFS_DQTYPE_GROUP) &&
+	    !has_quota_inode(XFS_DQTYPE_PROJ)) {
 		if (!no_modify)  {
 			do_warn(
 _("Warning:  no quota inodes were found.  Quotas disabled.\n"));
@@ -1361,7 +1430,7 @@ _("Warning:  quota inodes were cleared.  Quotas disabled.\n"));
 _("Warning:  quota inodes would be cleared.  Quotas would be disabled.\n"));
 		}
 	} else  {
-		if (lost_uquotino)  {
+		if (lost_quota_inode(XFS_DQTYPE_USER))  {
 			if (!no_modify)  {
 				do_warn(
 _("Warning:  user quota information was cleared.\n"
@@ -1373,7 +1442,7 @@ _("Warning:  user quota information would be cleared.\n"
 			}
 		}
 
-		if (lost_gquotino)  {
+		if (lost_quota_inode(XFS_DQTYPE_GROUP))  {
 			if (!no_modify)  {
 				do_warn(
 _("Warning:  group quota information was cleared.\n"
@@ -1385,7 +1454,7 @@ _("Warning:  group quota information would be cleared.\n"
 			}
 		}
 
-		if (lost_pquotino)  {
+		if (lost_quota_inode(XFS_DQTYPE_PROJ))  {
 			if (!no_modify)  {
 				do_warn(
 _("Warning:  project quota information was cleared.\n"
@@ -1425,6 +1494,9 @@ _("Warning:  project quota information would be cleared.\n"
 	if (!sbp)
 		do_error(_("couldn't get superblock\n"));
 
+	if (!xfs_has_metadir(mp))
+		update_sb_quotinos(mp, sbp);
+
 	if ((mp->m_sb.sb_qflags & XFS_ALL_QUOTA_CHKD) != quotacheck_results()) {
 		do_warn(_("Note - quota info will be regenerated on next "
 			"quota mount.\n"));
@@ -1457,6 +1529,10 @@ _("Note - stripe unit (%d) and width (%d) were copied from a backup superblock.\
 		mp->m_sb.sb_features_incompat |=
 				XFS_SB_FEAT_INCOMPAT_NEEDSREPAIR;
 	}
+
+	/* Always rewrite the realtime superblock */
+	if (xfs_has_rtsb(mp) && xfs_has_realtime(mp))
+		rewrite_rtsb(mp);
 
 	/*
 	 * Done. Flush all cached buffers and inodes first to ensure all

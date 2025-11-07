@@ -65,21 +65,23 @@ bmap(
 	fmt = (enum xfs_dinode_fmt)XFS_DFORK_FORMAT(dip, whichfork);
 	typ = whichfork == XFS_DATA_FORK ? TYP_BMAPBTD : TYP_BMAPBTA;
 	ASSERT(typtab[typ].typnm == typ);
-	ASSERT(fmt == XFS_DINODE_FMT_LOCAL || fmt == XFS_DINODE_FMT_EXTENTS ||
-		fmt == XFS_DINODE_FMT_BTREE);
-	if (fmt == XFS_DINODE_FMT_EXTENTS) {
+	switch (fmt) {
+	case XFS_DINODE_FMT_LOCAL:
+		break;
+	case XFS_DINODE_FMT_EXTENTS:
 		nextents = xfs_dfork_nextents(dip, whichfork);
 		xp = (xfs_bmbt_rec_t *)XFS_DFORK_PTR(dip, whichfork);
 		for (ep = xp; ep < &xp[nextents] && n < nex; ep++) {
 			if (!bmap_one_extent(ep, &curoffset, eoffset, &n, bep))
 				break;
 		}
-	} else if (fmt == XFS_DINODE_FMT_BTREE) {
+		break;
+	case XFS_DINODE_FMT_BTREE:
 		push_cur();
 		rblock = (xfs_bmdr_block_t *)XFS_DFORK_PTR(dip, whichfork);
 		fsize = XFS_DFORK_SIZE(dip, mp, whichfork);
-		pp = XFS_BMDR_PTR_ADDR(rblock, 1, libxfs_bmdr_maxrecs(fsize, 0));
-		kp = XFS_BMDR_KEY_ADDR(rblock, 1);
+		pp = xfs_bmdr_ptr_addr(rblock, 1, libxfs_bmdr_maxrecs(fsize, 0));
+		kp = xfs_bmdr_key_addr(rblock, 1);
 		bno = select_child(curoffset, kp, pp,
 					be16_to_cpu(rblock->bb_numrecs));
 		for (;;) {
@@ -88,9 +90,9 @@ bmap(
 			block = (struct xfs_btree_block *)iocur_top->data;
 			if (be16_to_cpu(block->bb_level) == 0)
 				break;
-			pp = XFS_BMBT_PTR_ADDR(mp, block, 1,
+			pp = xfs_bmbt_ptr_addr(mp, block, 1,
 				libxfs_bmbt_maxrecs(mp, mp->m_sb.sb_blocksize, 0));
-			kp = XFS_BMBT_KEY_ADDR(mp, block, 1);
+			kp = xfs_bmbt_key_addr(mp, block, 1);
 			bno = select_child(curoffset, kp, pp,
 					be16_to_cpu(block->bb_numrecs));
 		}
@@ -98,7 +100,7 @@ bmap(
 			nextbno = be64_to_cpu(block->bb_u.l.bb_rightsib);
 			nextents = be16_to_cpu(block->bb_numrecs);
 			xp = (xfs_bmbt_rec_t *)
-				XFS_BMBT_REC_ADDR(mp, block, 1);
+				xfs_bmbt_rec_addr(mp, block, 1);
 			for (ep = xp; ep < &xp[nextents] && n < nex; ep++) {
 				if (!bmap_one_extent(ep, &curoffset, eoffset,
 						&n, bep)) {
@@ -114,9 +116,51 @@ bmap(
 			block = (struct xfs_btree_block *)iocur_top->data;
 		}
 		pop_cur();
+		break;
+	default:
+		dbprintf(
+ _("%s fork format %u does not support indexable blocks\n"),
+				whichfork == XFS_DATA_FORK ? "data" : "attr",
+				fmt);
+		break;
 	}
 	pop_cur();
 	*nexp = n;
+}
+
+static void
+print_group_bmbt(
+	bool			isrt,
+	int			whichfork,
+	const struct bmap_ext	*be)
+{
+	unsigned int		gno;
+	unsigned long long	gbno;
+
+	if (whichfork == XFS_DATA_FORK && isrt) {
+		gno = xfs_fsb_to_gno(mp, be->startblock, XG_TYPE_RTG);
+		gbno = xfs_fsb_to_gbno(mp, be->startblock, XG_TYPE_RTG);
+	} else {
+		gno = xfs_fsb_to_gno(mp, be->startblock, XG_TYPE_AG);
+		gbno = xfs_fsb_to_gbno(mp, be->startblock, XG_TYPE_AG);
+	}
+
+	dbprintf(
+ _("%s offset %lld startblock %llu (%u/%llu) count %llu flag %u\n"),
+			whichfork == XFS_DATA_FORK ? _("data") : _("attr"),
+			be->startoff, be->startblock,
+			gno, gbno,
+			be->blockcount, be->flag);
+}
+
+static void
+print_linear_bmbt(
+	const struct bmap_ext	*be)
+{
+	dbprintf(_("%s offset %lld startblock %llu count %llu flag %u\n"),
+			_("data"),
+			be->startoff, be->startblock,
+			be->blockcount, be->flag);
 }
 
 static int
@@ -135,6 +179,7 @@ bmap_f(
 	xfs_extnum_t		nex;
 	char			*p;
 	int			whichfork;
+	bool			isrt;
 
 	if (iocur_top->ino == NULLFSINO) {
 		dbprintf(_("no current inode\n"));
@@ -154,6 +199,10 @@ bmap_f(
 			return 0;
 		}
 	}
+
+	dip = iocur_top->data;
+	isrt = (dip->di_flags & cpu_to_be16(XFS_DIFLAG_REALTIME));
+
 	if (afork + dfork == 0) {
 		push_cur();
 		set_cur_inode(iocur_top->ino);
@@ -198,13 +247,15 @@ bmap_f(
 			bmap(co, eo - co + 1, whichfork, &nex, &be);
 			if (nex == 0)
 				break;
-			dbprintf(_("%s offset %lld startblock %llu (%u/%u) count "
-				 "%llu flag %u\n"),
-				whichfork == XFS_DATA_FORK ? _("data") : _("attr"),
-				be.startoff, be.startblock,
-				XFS_FSB_TO_AGNO(mp, be.startblock),
-				XFS_FSB_TO_AGBNO(mp, be.startblock),
-				be.blockcount, be.flag);
+
+			if (whichfork == XFS_DATA_FORK && isrt) {
+				if (xfs_has_rtgroups(mp))
+					print_group_bmbt(isrt, whichfork, &be);
+				else
+					print_linear_bmbt(&be);
+			} else {
+				print_group_bmbt(isrt, whichfork, &be);
+			}
 			co = be.startoff + be.blockcount;
 		}
 		co = cosave;

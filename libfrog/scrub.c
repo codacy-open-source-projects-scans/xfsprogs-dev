@@ -107,12 +107,12 @@ const struct xfrog_scrub_descr xfrog_scrubbers[XFS_SCRUB_TYPE_NR] = {
 	[XFS_SCRUB_TYPE_RTBITMAP] = {
 		.name	= "rtbitmap",
 		.descr	= "realtime bitmap",
-		.group	= XFROG_SCRUB_GROUP_FS,
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
 	},
 	[XFS_SCRUB_TYPE_RTSUM] = {
 		.name	= "rtsummary",
 		.descr	= "realtime summary",
-		.group	= XFROG_SCRUB_GROUP_FS,
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
 	},
 	[XFS_SCRUB_TYPE_UQUOTA] = {
 		.name	= "usrquota",
@@ -154,8 +154,80 @@ const struct xfrog_scrub_descr xfrog_scrubbers[XFS_SCRUB_TYPE_NR] = {
 		.descr	= "directory tree structure",
 		.group	= XFROG_SCRUB_GROUP_INODE,
 	},
+	[XFS_SCRUB_TYPE_METAPATH] = {
+		.name	= "metapath",
+		.descr	= "metadata directory paths",
+		.group	= XFROG_SCRUB_GROUP_METAPATH,
+	},
+	[XFS_SCRUB_TYPE_RGSUPER] = {
+		.name	= "rgsuper",
+		.descr	= "realtime group superblock",
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
+	},
+	[XFS_SCRUB_TYPE_RTRMAPBT] = {
+		.name	= "rtrmapbt",
+		.descr	= "realtime reverse mapping btree",
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
+	},
+	[XFS_SCRUB_TYPE_RTREFCBT] = {
+		.name	= "rtrefcountbt",
+		.descr	= "realtime reference count btree",
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
+	},
 };
-#undef DEP
+
+const struct xfrog_scrub_descr xfrog_metapaths[XFS_SCRUB_METAPATH_NR] = {
+	[XFS_SCRUB_METAPATH_PROBE] = {
+		.name	= "probe",
+		.descr	= "metapath",
+		.group	= XFROG_SCRUB_GROUP_NONE,
+	},
+	[XFS_SCRUB_METAPATH_RTDIR] = {
+		.name	= "rtdir",
+		.descr	= "realtime group metadir",
+		.group	= XFROG_SCRUB_GROUP_FS,
+	},
+	[XFS_SCRUB_METAPATH_RTBITMAP] = {
+		.name	= "rtbitmap",
+		.descr	= "rtgroup bitmap",
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
+	},
+	[XFS_SCRUB_METAPATH_RTSUMMARY] = {
+		.name	= "rtsummary",
+		.descr	= "rtgroup summary",
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
+	},
+	[XFS_SCRUB_METAPATH_QUOTADIR] = {
+		.name	= "quotadir",
+		.descr	= "quota file metadir",
+		.group	= XFROG_SCRUB_GROUP_FS,
+	},
+	[XFS_SCRUB_METAPATH_USRQUOTA] = {
+		.name	= "usrquota",
+		.descr	= "user quota file",
+		.group	= XFROG_SCRUB_GROUP_FS,
+	},
+	[XFS_SCRUB_METAPATH_GRPQUOTA] = {
+		.name	= "grpquota",
+		.descr	= "group quota file",
+		.group	= XFROG_SCRUB_GROUP_FS,
+	},
+	[XFS_SCRUB_METAPATH_PRJQUOTA] = {
+		.name	= "prjquota",
+		.descr	= "project quota file",
+		.group	= XFROG_SCRUB_GROUP_FS,
+	},
+	[XFS_SCRUB_METAPATH_RTRMAPBT] = {
+		.name	= "rtrmapbt",
+		.descr	= "rtgroup rmap btree",
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
+	},
+	[XFS_SCRUB_METAPATH_RTREFCOUNTBT] = {
+		.name	= "rtrefcbt",
+		.descr	= "rtgroup refcount btree",
+		.group	= XFROG_SCRUB_GROUP_RTGROUP,
+	},
+};
 
 /* Invoke the scrub ioctl.  Returns zero or negative error code. */
 int

@@ -93,9 +93,12 @@ int	libxfs_trans_alloc(struct xfs_mount *mp, struct xfs_trans_res *resp,
 int	libxfs_trans_alloc_inode(struct xfs_inode *ip, struct xfs_trans_res *resv,
 			unsigned int dblocks, unsigned int rblocks, bool force,
 			struct xfs_trans **tpp);
+int	libxfs_trans_alloc_dir(struct xfs_inode *dp, struct xfs_trans_res *resv,
+			struct xfs_inode *ip, unsigned int *dblocks,
+			struct xfs_trans **tpp, int *nospace_error);
 int	libxfs_trans_alloc_rollable(struct xfs_mount *mp, uint blocks,
 				    struct xfs_trans **tpp);
-int	libxfs_trans_alloc_empty(struct xfs_mount *mp, struct xfs_trans **tpp);
+struct xfs_trans *libxfs_trans_alloc_empty(struct xfs_mount *mp);
 int	libxfs_trans_commit(struct xfs_trans *);
 void	libxfs_trans_cancel(struct xfs_trans *);
 int	libxfs_trans_reserve_more(struct xfs_trans *tp, uint blocks,
@@ -105,6 +108,7 @@ int	libxfs_trans_reserve_more(struct xfs_trans *tp, uint blocks,
 void xfs_defer_cancel(struct xfs_trans *);
 
 struct xfs_buf *libxfs_trans_getsb(struct xfs_trans *);
+struct xfs_buf *libxfs_trans_getrtsb(struct xfs_trans *tp);
 
 void	libxfs_trans_ijoin(struct xfs_trans *, struct xfs_inode *, uint);
 void	libxfs_trans_log_inode (struct xfs_trans *, struct xfs_inode *,

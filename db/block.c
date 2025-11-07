@@ -25,13 +25,19 @@ static int	dblock_f(int argc, char **argv);
 static void     dblock_help(void);
 static int	fsblock_f(int argc, char **argv);
 static void     fsblock_help(void);
+static int	rtblock_f(int argc, char **argv);
+static void	rtblock_help(void);
+static int	rtextent_f(int argc, char **argv);
+static void	rtextent_help(void);
+static int	logblock_f(int argc, char **argv);
+static void	logblock_help(void);
 static void	print_rawdata(void *data, int len);
 
 static const cmdinfo_t	ablock_cmd =
 	{ "ablock", NULL, ablock_f, 1, 1, 1, N_("filoff"),
 	  N_("set address to file offset (attr fork)"), ablock_help };
 static const cmdinfo_t	daddr_cmd =
-	{ "daddr", NULL, daddr_f, 0, 1, 1, N_("[d]"),
+	{ "daddr", NULL, daddr_f, 0, -1, 1, N_("[d]"),
 	  N_("set address to daddr value"), daddr_help };
 static const cmdinfo_t	dblock_cmd =
 	{ "dblock", NULL, dblock_f, 1, 1, 1, N_("filoff"),
@@ -39,6 +45,15 @@ static const cmdinfo_t	dblock_cmd =
 static const cmdinfo_t	fsblock_cmd =
 	{ "fsblock", "fsb", fsblock_f, 0, 1, 1, N_("[fsb]"),
 	  N_("set address to fsblock value"), fsblock_help };
+static const cmdinfo_t	rtblock_cmd =
+	{ "rtblock", "rtbno", rtblock_f, 0, 1, 1, N_("[rtbno]"),
+	  N_("set address to rtblock value"), rtblock_help };
+static const cmdinfo_t	rtextent_cmd =
+	{ "rtextent", "rtx", rtextent_f, 0, 1, 1, N_("[rtxno]"),
+	  N_("set address to rtextent value"), rtextent_help };
+static const cmdinfo_t	logblock_cmd =
+	{ "logblock", "lsb", logblock_f, 0, 1, 1, N_("[logbno]"),
+	  N_("set address to logblock value"), logblock_help };
 
 static void
 ablock_help(void)
@@ -104,6 +119,9 @@ block_init(void)
 	add_command(&daddr_cmd);
 	add_command(&dblock_cmd);
 	add_command(&fsblock_cmd);
+	add_command(&rtblock_cmd);
+	add_command(&rtextent_cmd);
+	add_command(&logblock_cmd);
 }
 
 static void
@@ -117,35 +135,83 @@ daddr_help(void)
 ));
 }
 
+enum daddr_target {
+	DT_DATA,
+	DT_RT,
+	DT_LOG,
+};
+
 static int
 daddr_f(
 	int		argc,
 	char		**argv)
 {
+	xfs_rfsblock_t	max_daddrs = mp->m_sb.sb_dblocks;
 	int64_t		d;
 	char		*p;
 	int		bb_count = BTOBB(mp->m_sb.sb_sectsize);
+	int		c;
+	enum daddr_target tgt = DT_DATA;
 
-	if (argc == 1) {
+	while ((c = getopt(argc, argv, "rl")) != -1) {
+		switch (c) {
+		case 'r':
+			tgt = DT_RT;
+			max_daddrs = mp->m_sb.sb_rblocks;
+			break;
+		case 'l':
+			tgt = DT_LOG;
+			max_daddrs = mp->m_sb.sb_logblocks;
+			break;
+		default:
+			daddr_help();
+			return 0;
+		}
+	}
+
+	if (tgt == DT_LOG && mp->m_sb.sb_logstart > 0) {
+		dbprintf(_("filesystem has internal log\n"));
+		return 0;
+	}
+
+	if (optind == argc) {
 		xfs_daddr_t	daddr = iocur_top->off >> BBSHIFT;
 
 		if (iocur_is_ddev(iocur_top))
 			dbprintf(_("datadev daddr is %lld\n"), daddr);
 		else if (iocur_is_extlogdev(iocur_top))
 			dbprintf(_("logdev daddr is %lld\n"), daddr);
+		else if (iocur_is_rtdev(iocur_top))
+			dbprintf(_("rtdev daddr is %lld\n"), daddr);
 		else
 			dbprintf(_("current daddr is %lld\n"), daddr);
 
 		return 0;
 	}
-	d = (int64_t)strtoull(argv[1], &p, 0);
+
+	if (optind != argc - 1) {
+		daddr_help();
+		return 0;
+	}
+
+	d = (int64_t)strtoull(argv[optind], &p, 0);
 	if (*p != '\0' ||
-	    d >= mp->m_sb.sb_dblocks << (mp->m_sb.sb_blocklog - BBSHIFT)) {
+	    d >= max_daddrs << (mp->m_sb.sb_blocklog - BBSHIFT)) {
 		dbprintf(_("bad daddr %s\n"), argv[1]);
 		return 0;
 	}
 	ASSERT(typtab[TYP_DATA].typnm == TYP_DATA);
-	set_cur(&typtab[TYP_DATA], d, bb_count, DB_RING_ADD, NULL);
+	switch (tgt) {
+	case DT_DATA:
+		set_cur(&typtab[TYP_DATA], d, bb_count, DB_RING_ADD, NULL);
+		break;
+	case DT_RT:
+		set_rt_cur(&typtab[TYP_DATA], d, bb_count, DB_RING_ADD, NULL);
+		break;
+	case DT_LOG:
+		set_log_cur(&typtab[TYP_DATA], d, bb_count, DB_RING_ADD, NULL);
+		break;
+	}
 	return 0;
 }
 
@@ -161,6 +227,13 @@ dblock_help(void)
 ));
 }
 
+static inline bool
+is_rtfile(
+	struct xfs_dinode	*dip)
+{
+	return dip->di_flags & cpu_to_be16(XFS_DIFLAG_REALTIME);
+}
+
 static int
 dblock_f(
 	int		argc,
@@ -173,6 +246,7 @@ dblock_f(
 	int		nb;
 	xfs_extnum_t	nex;
 	char		*p;
+	bool		isrt;
 	typnm_t		type;
 
 	bno = (xfs_fileoff_t)strtoull(argv[1], &p, 0);
@@ -182,6 +256,7 @@ dblock_f(
 	}
 	push_cur();
 	set_cur_inode(iocur_top->ino);
+	isrt = is_rtfile(iocur_top->data);
 	type = inode_next_type();
 	pop_cur();
 	if (type == TYP_NONE) {
@@ -200,8 +275,14 @@ dblock_f(
 	ASSERT(typtab[type].typnm == type);
 	if (nex > 1)
 		make_bbmap(&bbmap, nex, bmp);
-	set_cur(&typtab[type], (int64_t)XFS_FSB_TO_DADDR(mp, dfsbno),
-		nb * blkbb, DB_RING_ADD, nex > 1 ? &bbmap : NULL);
+	if (isrt)
+		set_rt_cur(&typtab[type], xfs_rtb_to_daddr(mp, dfsbno),
+				nb * blkbb, DB_RING_ADD,
+				nex > 1 ? &bbmap : NULL);
+	else
+		set_cur(&typtab[type], (int64_t)XFS_FSB_TO_DADDR(mp, dfsbno),
+				nb * blkbb, DB_RING_ADD,
+				nex > 1 ? &bbmap : NULL);
 	free(bmp);
 	return 0;
 }
@@ -251,6 +332,201 @@ fsblock_f(
 	ASSERT(typtab[TYP_DATA].typnm == TYP_DATA);
 	set_cur(&typtab[TYP_DATA], XFS_AGB_TO_DADDR(mp, agno, agbno),
 		blkbb, DB_RING_ADD, NULL);
+	return 0;
+}
+
+static void
+rtblock_help(void)
+{
+	dbprintf(_(
+"\n Example:\n"
+"\n"
+" 'rtblock 1023' - sets the file position to the 1023rd block on the realtime\n"
+" volume. The filesystem block size is specified in the superblock and set\n"
+" during mkfs time.\n\n"
+));
+}
+
+static int
+rtblock_f(
+	int		argc,
+	char		**argv)
+{
+	xfs_rtblock_t	rtbno;
+	char		*p;
+
+	if (argc == 1) {
+		if (!iocur_is_rtdev(iocur_top)) {
+			dbprintf(_("cursor does not point to rt device\n"));
+			return 0;
+		}
+		dbprintf(_("current rtblock is %lld\n"),
+			xfs_daddr_to_rtb(mp, iocur_top->off >> BBSHIFT));
+		return 0;
+	}
+	rtbno = strtoull(argv[1], &p, 0);
+	if (*p != '\0') {
+		dbprintf(_("bad rtblock %s\n"), argv[1]);
+		return 0;
+	}
+
+	if (xfs_has_rtgroups(mp)) {
+		xfs_rgnumber_t	rgno = xfs_rtb_to_rgno(mp, rtbno);
+		xfs_rgblock_t	rgbno = xfs_rtb_to_rgbno(mp, rtbno);
+
+		if (rgno >= mp->m_sb.sb_rgcount ||
+		    rgbno >= mp->m_sb.sb_rgextents * mp->m_sb.sb_rextsize) {
+			dbprintf(_("bad rtblock %s\n"), argv[1]);
+			return 0;
+		}
+	} else {
+		if (rtbno >= mp->m_sb.sb_rblocks) {
+			dbprintf(_("bad rtblock %s\n"), argv[1]);
+			return 0;
+		}
+	}
+
+	ASSERT(typtab[TYP_DATA].typnm == TYP_DATA);
+	set_rt_cur(&typtab[TYP_DATA], xfs_rtb_to_daddr(mp, rtbno), blkbb,
+			DB_RING_ADD, NULL);
+	return 0;
+}
+
+static void
+rtextent_help(void)
+{
+	dbprintf(_(
+"\n Example:\n"
+"\n"
+" 'rtextent 10' - sets the file position to the 10th extent on the realtime\n"
+" volume. The realtime extent size is specified in the superblock and set\n"
+" during mkfs or growfs time.\n\n"
+));
+}
+
+/*
+ * Move the cursor to a specific location on the realtime block device given
+ * a linear address in units of realtime extents.
+ *
+ * NOTE: The user interface assumes a global RT extent number, while the
+ * in-kernel rtx is per-RTG now, thus the odd conversions here.
+ */
+static int
+rtextent_f(
+	int		argc,
+	char		**argv)
+{
+	uint64_t	rfsbno;
+	uint64_t	rtx;
+	char		*p;
+
+	if (argc == 1) {
+		if (!iocur_is_rtdev(iocur_top)) {
+			dbprintf(_("cursor does not point to rt device\n"));
+			return 0;
+		}
+
+		rfsbno = XFS_BB_TO_FSB(mp, iocur_top->off >> BBSHIFT);
+		dbprintf(_("current rtextent is %lld\n"),
+				xfs_blen_to_rtbxlen(mp, rfsbno));
+		return 0;
+	}
+	rtx = strtoull(argv[1], &p, 0);
+	if (*p != '\0') {
+		dbprintf(_("bad rtextent %s\n"), argv[1]);
+		return 0;
+	}
+	if (rtx >= mp->m_sb.sb_rextents) {
+		dbprintf(_("bad rtextent %s\n"), argv[1]);
+		return 0;
+	}
+
+	rfsbno = xfs_rtbxlen_to_blen(mp, rtx);
+	ASSERT(typtab[TYP_DATA].typnm == TYP_DATA);
+	set_rt_cur(&typtab[TYP_DATA], XFS_FSB_TO_BB(mp, rfsbno),
+			mp->m_sb.sb_rextsize * blkbb, DB_RING_ADD, NULL);
+	return 0;
+}
+
+static void
+logblock_help(void)
+{
+	dbprintf(_(
+"\n Example:\n"
+"\n"
+" 'logblock 1023' - sets the file position to the 1023rd log block.\n"
+" The external log device or the block offset within the internal log will be\n"
+" chosen as appropriate.\n"
+));
+}
+
+static int
+logblock_f(
+	int		argc,
+	char		**argv)
+{
+	xfs_fsblock_t	logblock;
+	char		*p;
+
+	if (argc == 1) {
+		if (mp->m_sb.sb_logstart > 0 && iocur_is_ddev(iocur_top)) {
+			logblock = XFS_DADDR_TO_FSB(mp,
+						iocur_top->off >> BBSHIFT);
+
+			if (logblock < mp->m_sb.sb_logstart ||
+			    logblock >= mp->m_sb.sb_logstart +
+					mp->m_sb.sb_logblocks) {
+				dbprintf(
+ _("current address not within internal log\n"));
+				return 0;
+			}
+
+			dbprintf(_("current logblock is %lld\n"),
+					logblock - mp->m_sb.sb_logstart);
+			return 0;
+		}
+
+		if (mp->m_sb.sb_logstart == 0 &&
+		    iocur_is_extlogdev(iocur_top)) {
+			logblock = XFS_BB_TO_FSB(mp,
+						iocur_top->off >> BBSHIFT);
+
+			if (logblock >= mp->m_sb.sb_logblocks) {
+				dbprintf(
+ _("current address not within external log\n"));
+				return 0;
+			}
+
+			dbprintf(_("current logblock is %lld\n"), logblock);
+			return 0;
+		}
+
+		dbprintf(_("current address does not point to log\n"));
+		return 0;
+	}
+
+	logblock = strtoull(argv[1], &p, 0);
+	if (*p != '\0') {
+		dbprintf(_("bad logblock %s\n"), argv[1]);
+		return 0;
+	}
+
+	if (logblock >= mp->m_sb.sb_logblocks) {
+		dbprintf(_("bad logblock %s\n"), argv[1]);
+		return 0;
+	}
+
+	ASSERT(typtab[TYP_DATA].typnm == TYP_DATA);
+
+	if (mp->m_sb.sb_logstart) {
+		logblock += mp->m_sb.sb_logstart;
+		set_cur(&typtab[TYP_DATA], XFS_FSB_TO_DADDR(mp, logblock),
+				blkbb, DB_RING_ADD, NULL);
+	} else {
+		set_log_cur(&typtab[TYP_DATA], XFS_FSB_TO_BB(mp, logblock),
+				blkbb, DB_RING_ADD, NULL);
+	}
+
 	return 0;
 }
 

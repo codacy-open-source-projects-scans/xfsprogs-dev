@@ -200,7 +200,7 @@ option will set the file permissions to read-write (0644). This allows xfs_io to
 set up mismatches between the file permissions and the open file descriptor
 read/write mode to exercise permission checks inside various syscalls.
 .TP
-.BI "pread [ \-b " bsize " ] [ \-qv ] [ \-FBR [ \-Z " seed " ] ] [ \-V " vectors " ] " "offset length"
+.BI "pread [ \-b " bsize " ] [ \-qUv ] [ \-FBR [ \-Z " seed " ] ] [ \-V " vectors " ] " "offset length"
 Reads a range of bytes in a specified blocksize from the given
 .IR offset .
 .RS 1.0i
@@ -213,6 +213,12 @@ requests will be split. The default blocksize is 4096 bytes.
 .TP
 .B \-q
 quiet mode, do not write anything to standard output.
+.TP
+.B \-U
+Perform the
+.BR preadv2 (2)
+call with
+.IR RWF_DONTCACHE .
 .TP
 .B \-v
 dump the contents of the buffer after reading,
@@ -244,7 +250,7 @@ See the
 .B pread
 command.
 .TP
-.BI "pwrite [ \-i " file " ] [ \-qAdDwNOW ] [ \-s " skip " ] [ \-b " size " ] [ \-S " seed " ] [ \-FBR [ \-Z " zeed " ] ] [ \-V " vectors " ] " "offset length"
+.BI "pwrite [ \-i " file " ] [ \-qAdDwNOUW ] [ \-s " skip " ] [ \-b " size " ] [ \-S " seed " ] [ \-FBR [ \-Z " zeed " ] ] [ \-V " vectors " ] " "offset length"
 Writes a range of bytes in a specified blocksize from the given
 .IR offset .
 The bytes written can be either a set pattern or read in from another
@@ -286,6 +292,12 @@ Perform the
 .BR pwritev2 (2)
 call with
 .IR RWF_ATOMIC .
+.TP
+.B \-U
+Perform the
+.BR pwritev2 (2)
+call with
+.IR RWF_DONTCACHE .
 .TP
 .B \-O
 perform pwrite once and return the (maybe partial) bytes written.
@@ -538,6 +550,12 @@ With the
 .B -k
 option, use the FALLOC_FL_KEEP_SIZE flag as well.
 .TP
+.BI fwzero " offset length"
+Call fallocate with FALLOC_FL_WRITE_ZEROES flag as described in the
+.BR fallocate (2)
+manual page to allocate and zero blocks within the range by submitting write
+zeroes.
+.TP
 .BI zero " offset length"
 Call xfsctl with
 .B XFS_IOC_ZERO_RANGE
@@ -731,6 +749,9 @@ Options include:
 .TP
 .B \-C
 Print timing information in a condensed format.
+.TP
+.B \-c
+Exchange contents only if file2 has not changed.
 .TP
 .BI \-d " dest_offset"
 Swap extents with open file beginning at
@@ -979,10 +1000,24 @@ Dump raw statx structure values.
 Set the field mask for the statx call to STATX_BASIC_STATS.
 .TP
 .B \-m all
-Set the the field mask for the statx call to STATX_ALL (default).
+Set all bits in the field mask for the statx call except for STATX__RESERVED.
+If no
+.B -m
+arguments are specified, the default is STATX_BASIC_STATS and STATX_BTIME.
 .TP
 .B \-m <mask>
 Specify a numeric field mask for the statx call.
+.TP
+.BI "\-m +" value
+Add this value to the statx field value.
+Values can be numeric, or they can be words describing the desired fields.
+See the help command output for a list of recognized words.
+.TP
+.BI "\-m -" value
+Remove this value from the statx field value.
+.TP
+.BI "\-m +" value ",-" value
+Add and remove multiple values from the statx field value.
 .TP
 .B \-F
 Force the attributes to be synced with the server.
@@ -1055,7 +1090,40 @@ sec uses UNIX timestamp notation and is the seconds elapsed since
 nsec is the nanoseconds since the sec. This value needs to be in
 the range 0-999999999 with UTIME_NOW and UTIME_OMIT being exceptions.
 Each (sec, nsec) pair constitutes a single timestamp value.
-
+.TP
+.BI "startupdate [ " -e ]
+Create a temporary clone of a file in which to stage file updates.
+The
+.B \-e
+option creates an empty staging file.
+.TP
+.B cancelupdate
+Abandon changes from a update staging file.
+.TP
+.BI "commitupdate [" OPTIONS ]
+Commit changes from a update staging file to the real file.
+.RS 1.0i
+.PD 0
+.TP 0.4i
+.B \-C
+Print timing information in a condensed format.
+.TP 0.4i
+.B \-h
+Only swap ranges in the update staging file that were actually written.
+.TP 0.4i
+.B \-k
+Do not change file size.
+.TP 0.4i
+.B \-n
+Check parameters without changing anything.
+.TP 0.4i
+.B \-q
+Do not print timing information at all.
+.PD
+.RE
+.TP
+.BI "cachestat off len
+Print page cache statistics for the given file range.
 
 .SH MEMORY MAPPED I/O COMMANDS
 .TP
@@ -1210,7 +1278,19 @@ for the current memory mapping.
 
 .SH FILESYSTEM COMMANDS
 .TP
-.BI "bulkstat [ \-a " agno " ] [ \-d ] [ \-e " endino " ] [ \-n " batchsize " ] [ \-q ] [ \-s " startino " ] [ \-v " version" ]
+.BI "aginfo [ \-a " agno " ]"
+Show information about or update the state of allocation groups.
+.RE
+.RS 1.0i
+.PD 0
+.TP
+.BI \-a
+Act only on a specific allocation group.
+.PD
+.RE
+
+.TP
+.BI "bulkstat [ \-a " agno " ] [ \-d ] [ \-e " endino " ] [ \-m ] [ \-n " batchsize " ] [ \-q ] [ \-s " startino " ] [ \-v " version" ]
 Display raw stat information about a bunch of inodes in an XFS filesystem.
 Options are as follows:
 .RS 1.0i
@@ -1226,6 +1306,9 @@ Print debugging information about call results.
 .BI \-e " endino"
 Stop displaying records when this inode number is reached.
 Defaults to stopping when the system call stops returning results.
+.TP
+.BI \-m
+Include metadata directories in the output.
 .TP
 .BI \-n " batchsize"
 Retrieve at most this many records per call.
@@ -1247,10 +1330,11 @@ Currently supported versions are 1 and 5.
 .RE
 .PD
 .TP
-.BI "bulkstat_single [ \-d ] [ \-v " version " ] [ " inum... " | " special... " ]
+.BI "bulkstat_single [ \-d ] [ \-m ] [ \-v " version " ] [ " inum... " | " special... " ]
 Display raw stat information about individual inodes in an XFS filesystem.
 The
-.B \-d
+.BR \-d ,
+.BR \-m ,
 and
 .B \-v
 options are the same as the
@@ -1279,6 +1363,19 @@ specific points under adverse conditions. Without the
 .I tag
 argument, displays the list of error tags available.
 Only available in expert mode and requires privileges.
+
+.TP
+.BI "rginfo [ \-r " rgno " ]"
+Show information about or update the state of realtime allocation groups.
+.RE
+.RS 1.0i
+.PD 0
+.TP
+.BI \-r
+Act only on a specific realtime group.
+.PD
+.RE
+
 .TP
 .BI "resblks [ " blocks " ]"
 Get and/or set count of reserved filesystem blocks using the
@@ -1388,13 +1485,16 @@ Currently supported versions are 1 and 5.
 .RE
 .PD
 .TP
-.BI "scrub " type " [ " agnumber " | " "ino" " " "gen" " ]"
+.BI "scrub " type " [ " agnumber " | " rgnumber " | " "ino" " " "gen" " | " metapath " [ " rgnumber " ] ]"
 Scrub internal XFS filesystem metadata.  The
 .BI type
 parameter specifies which type of metadata to scrub.
 For AG metadata, one AG number must be specified.
+For realtime group metadata, one rtgroup number must be specified.
 For file metadata, the scrub is applied to the open file unless the
 inode number and generation number are specified.
+For metapath, the name of a file or a raw number must be specified.
+If the metapath file is a per-rtgroup file, the group number must be specified.
 .RE
 .PD
 .TP

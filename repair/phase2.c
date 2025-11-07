@@ -14,6 +14,8 @@
 #include "incore.h"
 #include "progress.h"
 #include "scan.h"
+#include "rt.h"
+#include "quotacheck.h"
 
 /* workaround craziness in the xlog routines */
 int xlog_recover_do_trans(struct xlog *log, struct xlog_recover *t, int p)
@@ -70,10 +72,11 @@ zero_log(
 				do_warn(_(
 "ERROR: The filesystem has valuable metadata changes in a log which needs to\n"
 "be replayed.  Mount the filesystem to replay the log, and unmount it before\n"
-"re-running xfs_repair.  If you are unable to mount the filesystem, then use\n"
-"the -L option to destroy the log and attempt a repair.\n"
-"Note that destroying the log may cause corruption -- please attempt a mount\n"
-"of the filesystem before doing this.\n"));
+"re-running xfs_repair.  If the filesystem is a snapshot of a mounted\n"
+"filesystem, you may need to give mount the nouuid option. If you are unable\n"
+"to mount the filesystem, then use the -L option to destroy the log and\n"
+"attempt a repair.  Note that destroying the log may cause corruption --\n"
+"please attempt a mount of the filesystem before doing this.\n"));
 				exit(2);
 			}
 		}
@@ -274,12 +277,11 @@ check_fs_free_space(
 	const struct check_state	*old,
 	struct xfs_sb			*new_sb)
 {
-	struct xfs_perag		*pag;
-	xfs_agnumber_t			agno;
+	struct xfs_perag		*pag = NULL;
 	int				error;
 
 	/* Make sure we have enough space for per-AG reservations. */
-	for_each_perag(mp, agno, pag) {
+	while ((pag = xfs_perag_next(mp, pag))) {
 		struct xfs_trans	*tp;
 		struct xfs_agf		*agf;
 		struct xfs_buf		*agi_bp, *agf_bp;
@@ -294,23 +296,19 @@ check_fs_free_space(
 		 * there while we try to make a per-AG reservation with the new
 		 * geometry.
 		 */
-		error = -libxfs_trans_alloc_empty(mp, &tp);
-		if (error)
-			do_error(
-	_("Cannot reserve resources for upgrade check, err=%d.\n"),
-					error);
+		tp = libxfs_trans_alloc_empty(mp);
 
 		error = -libxfs_ialloc_read_agi(pag, tp, 0, &agi_bp);
 		if (error)
 			do_error(
 	_("Cannot read AGI %u for upgrade check, err=%d.\n"),
-					pag->pag_agno, error);
+					pag_agno(pag), error);
 
 		error = -libxfs_alloc_read_agf(pag, tp, 0, &agf_bp);
 		if (error)
 			do_error(
 	_("Cannot read AGF %u for upgrade check, err=%d.\n"),
-					pag->pag_agno, error);
+					pag_agno(pag), error);
 		agf = agf_bp->b_addr;
 		agblocks = be32_to_cpu(agf->agf_length);
 
@@ -326,13 +324,13 @@ check_fs_free_space(
 		if (error == ENOSPC) {
 			printf(
 	_("Not enough free space would remain in AG %u for metadata.\n"),
-					pag->pag_agno);
+					pag_agno(pag));
 			exit(1);
 		}
 		if (error)
 			do_error(
 	_("Error %d while checking AG %u space reservation.\n"),
-					error, pag->pag_agno);
+					error, pag_agno(pag));
 
 		/*
 		 * Would the post-upgrade filesystem have enough free space in
@@ -345,7 +343,7 @@ check_fs_free_space(
 		if (!check_free_space(mp, avail, agblocks)) {
 			printf(
 	_("AG %u will be low on space after upgrade.\n"),
-					pag->pag_agno);
+					pag_agno(pag));
 			exit(1);
 		}
 		libxfs_trans_cancel(tp);
@@ -365,7 +363,7 @@ check_fs_free_space(
 	 * uninitialized so that we don't trip over stale cached counters
 	 * after the upgrade/
 	 */
-	for_each_perag(mp, agno, pag) {
+	while ((pag = xfs_perag_next(mp, pag))) {
 		libxfs_ag_resv_free(pag);
 		clear_bit(XFS_AGSTATE_AGF_INIT, &pag->pag_opstate);
 		clear_bit(XFS_AGSTATE_AGI_INIT, &pag->pag_opstate);
@@ -497,8 +495,8 @@ phase2(
 	struct xfs_mount	*mp,
 	int			scan_threads)
 {
-	int			j;
 	ino_tree_node_t		*ino_rec;
+	unsigned int		inuse = xfs_rootrec_inodes_inuse(mp), j;
 
 	/* now we can start using the buffer cache routines */
 	set_mp(mp);
@@ -542,59 +540,91 @@ phase2(
 	 * make sure we know about the root inode chunk
 	 */
 	if ((ino_rec = find_inode_rec(mp, 0, mp->m_sb.sb_rootino)) == NULL)  {
-		ASSERT(mp->m_sb.sb_rbmino == mp->m_sb.sb_rootino + 1 &&
-			mp->m_sb.sb_rsumino == mp->m_sb.sb_rootino + 2);
+		struct xfs_sb	*sb = &mp->m_sb;
+
+		if (xfs_has_metadir(mp))
+			ASSERT(sb->sb_metadirino == sb->sb_rootino + 1);
+		else
+			ASSERT(sb->sb_rbmino  == sb->sb_rootino + 1 &&
+			       sb->sb_rsumino == sb->sb_rootino + 2);
 		do_warn(_("root inode chunk not found\n"));
 
 		/*
-		 * mark the first 3 used, the rest are free
+		 * mark the first 2-3 inodes used, the rest are free
 		 */
 		ino_rec = set_inode_used_alloc(mp, 0,
-				(xfs_agino_t) mp->m_sb.sb_rootino);
-		set_inode_used(ino_rec, 1);
-		set_inode_used(ino_rec, 2);
+				XFS_INO_TO_AGINO(mp, sb->sb_rootino));
+		for (j = 1; j < inuse; j++) {
+			set_inode_used(ino_rec, j);
+			set_inode_is_meta(ino_rec, j);
+		}
 
-		for (j = 3; j < XFS_INODES_PER_CHUNK; j++)
+		for (j = inuse; j < XFS_INODES_PER_CHUNK; j++)
 			set_inode_free(ino_rec, j);
 
 		/*
 		 * also mark blocks
 		 */
-		set_bmap_ext(0, XFS_INO_TO_AGBNO(mp, mp->m_sb.sb_rootino),
-			     M_IGEO(mp)->ialloc_blks, XR_E_INO);
+		set_bmap_ext(0, XFS_INO_TO_AGBNO(mp, sb->sb_rootino),
+			     M_IGEO(mp)->ialloc_blks, XR_E_INO, false);
 	} else  {
 		do_log(_("        - found root inode chunk\n"));
+		j = 0;
 
 		/*
 		 * blocks are marked, just make sure they're in use
 		 */
-		if (is_inode_free(ino_rec, 0))  {
+		if (is_inode_free(ino_rec, j)) {
 			do_warn(_("root inode marked free, "));
-			set_inode_used(ino_rec, 0);
+			set_inode_used(ino_rec, j);
 			if (!no_modify)
 				do_warn(_("correcting\n"));
 			else
 				do_warn(_("would correct\n"));
 		}
+		j++;
 
-		if (is_inode_free(ino_rec, 1))  {
-			do_warn(_("realtime bitmap inode marked free, "));
-			set_inode_used(ino_rec, 1);
-			if (!no_modify)
-				do_warn(_("correcting\n"));
-			else
-				do_warn(_("would correct\n"));
+		if (xfs_has_metadir(mp)) {
+			if (is_inode_free(ino_rec, j))  {
+				do_warn(_("metadata root inode marked free, "));
+				set_inode_used(ino_rec, j);
+				if (!no_modify)
+					do_warn(_("correcting\n"));
+				else
+					do_warn(_("would correct\n"));
+			}
+			set_inode_is_meta(ino_rec, j);
+			j++;
 		}
 
-		if (is_inode_free(ino_rec, 2))  {
-			do_warn(_("realtime summary inode marked free, "));
-			set_inode_used(ino_rec, 2);
-			if (!no_modify)
-				do_warn(_("correcting\n"));
-			else
-				do_warn(_("would correct\n"));
+		if (!xfs_has_rtgroups(mp)) {
+			if (is_inode_free(ino_rec, j))  {
+				do_warn(_("realtime bitmap inode marked free, "));
+				set_inode_used(ino_rec, j);
+				if (!no_modify)
+					do_warn(_("correcting\n"));
+				else
+					do_warn(_("would correct\n"));
+			}
+			set_inode_is_meta(ino_rec, j);
+			j++;
+
+			if (is_inode_free(ino_rec, j))  {
+				do_warn(_("realtime summary inode marked free, "));
+				set_inode_used(ino_rec, j);
+				if (!no_modify)
+					do_warn(_("correcting\n"));
+				else
+					do_warn(_("would correct\n"));
+			}
+			set_inode_is_meta(ino_rec, j);
+			j++;
 		}
 	}
+
+	discover_rtgroup_inodes(mp);
+	if (xfs_has_metadir(mp) && xfs_has_quota(mp))
+		discover_quota_inodes(mp);
 
 	/*
 	 * Upgrade the filesystem now that we've done a preliminary check of

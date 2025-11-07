@@ -14,6 +14,8 @@
 
 static cmdinfo_t	fsmap_cmd;
 static dev_t		xfs_data_dev;
+static dev_t		xfs_log_dev;
+static dev_t		xfs_rt_dev;
 
 static void
 fsmap_help(void)
@@ -170,7 +172,7 @@ dump_map_verbose(
 	unsigned long long	i;
 	struct fsmap		*p;
 	int			agno;
-	off_t			agoff, bperag;
+	off_t			agoff, bperag, bperrtg;
 	int			foff_w, boff_w, aoff_w, tot_w, agno_w, own_w;
 	int			nr_w, dev_w;
 	char			rbuf[40], bbuf[40], abuf[40], obuf[40];
@@ -185,6 +187,7 @@ dump_map_verbose(
 	tot_w = MINTOT_WIDTH;
 	bperag = (off_t)fsgeo->agblocks *
 		  (off_t)fsgeo->blocksize;
+	bperrtg = bytes_per_rtgroup(fsgeo);
 	sunit = (fsgeo->sunit * fsgeo->blocksize);
 	swidth = (fsgeo->swidth * fsgeo->blocksize);
 
@@ -239,6 +242,18 @@ dump_map_verbose(
 		if (p->fmr_device == xfs_data_dev) {
 			agno = p->fmr_physical / bperag;
 			agoff = p->fmr_physical - (agno * bperag);
+			snprintf(abuf, sizeof(abuf),
+				"(%lld..%lld)",
+				(long long)BTOBBT(agoff),
+				(long long)BTOBBT(agoff + p->fmr_length - 1));
+		} else if (p->fmr_device == xfs_rt_dev && fsgeo->rgcount > 0) {
+			uint64_t start = p->fmr_physical -
+				fsgeo->rtstart * fsgeo->blocksize;
+
+			agno = start / bperrtg;
+			if (agno < 0)
+				agno = -1;
+			agoff = start % bperrtg;
 			snprintf(abuf, sizeof(abuf),
 				"(%lld..%lld)",
 				(long long)BTOBBT(agoff),
@@ -308,6 +323,21 @@ dump_map_verbose(
 		if (p->fmr_device == xfs_data_dev) {
 			agno = p->fmr_physical / bperag;
 			agoff = p->fmr_physical - (agno * bperag);
+			snprintf(abuf, sizeof(abuf),
+				"(%lld..%lld)",
+				(long long)BTOBBT(agoff),
+				(long long)BTOBBT(agoff + p->fmr_length - 1));
+			snprintf(gbuf, sizeof(gbuf),
+				"%lld",
+				(long long)agno);
+		} else if (p->fmr_device == xfs_rt_dev && fsgeo->rgcount > 0) {
+			uint64_t start = p->fmr_physical -
+				fsgeo->rtstart * fsgeo->blocksize;
+
+			agno = start / bperrtg;
+			if (agno < 0)
+				agno = -1;
+			agoff = start % bperrtg;
 			snprintf(abuf, sizeof(abuf),
 				"(%lld..%lld)",
 				(long long)BTOBBT(agoff),
@@ -386,8 +416,6 @@ fsmap_f(
 	int			c;
 	unsigned long long	nr = 0;
 	size_t			fsblocksize, fssectsize;
-	struct fs_path		*fs;
-	static bool		tab_init;
 	bool			dumped_flags = false;
 	int			dflag, lflag, rflag;
 
@@ -472,15 +500,28 @@ fsmap_f(
 		return 0;
 	}
 
+	/*
+	 * File systems with internal rt device use synthetic device values.
+	 */
+	if (file->geom.rtstart) {
+		xfs_data_dev = XFS_DEV_DATA;
+		xfs_log_dev = XFS_DEV_LOG;
+		xfs_rt_dev = XFS_DEV_RT;
+	} else {
+		xfs_data_dev = file->fs_path.fs_datadev;
+		xfs_log_dev = file->fs_path.fs_logdev;
+		xfs_rt_dev = file->fs_path.fs_rtdev;
+	}
+
 	memset(head, 0, sizeof(*head));
 	l = head->fmh_keys;
 	h = head->fmh_keys + 1;
 	if (dflag) {
-		l->fmr_device = h->fmr_device = file->fs_path.fs_datadev;
+		l->fmr_device = h->fmr_device = xfs_data_dev;
 	} else if (lflag) {
-		l->fmr_device = h->fmr_device = file->fs_path.fs_logdev;
+		l->fmr_device = h->fmr_device = xfs_log_dev;
 	} else if (rflag) {
-		l->fmr_device = h->fmr_device = file->fs_path.fs_rtdev;
+		l->fmr_device = h->fmr_device = xfs_rt_dev;
 	} else {
 		l->fmr_device = 0;
 		h->fmr_device = UINT_MAX;
@@ -490,17 +531,6 @@ fsmap_f(
 	h->fmr_owner = ULLONG_MAX;
 	h->fmr_flags = UINT_MAX;
 	h->fmr_offset = ULLONG_MAX;
-
-	/*
-	 * If this is an XFS filesystem, remember the data device.
-	 * (We report AG number/block for data device extents on XFS).
-	 */
-	if (!tab_init) {
-		fs_table_initialise(0, NULL, 0, NULL);
-		tab_init = true;
-	}
-	fs = fs_table_lookup(file->name, FS_MOUNT_POINT);
-	xfs_data_dev = fs ? fs->fs_datadev : 0;
 
 	head->fmh_count = map_size;
 	do {

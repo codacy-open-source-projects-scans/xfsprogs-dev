@@ -9,6 +9,7 @@ LTCOMMAND = xfs_io
 LSRCFILES = xfs_bmap.sh xfs_freeze.sh xfs_mkfile.sh xfs_property
 HFILES = init.h io.h
 CFILES = \
+	aginfo.c \
 	attr.c \
 	bmap.c \
 	bulkstat.c \
@@ -60,12 +61,17 @@ CFILES += copy_file_range.c
 LCFLAGS += -DHAVE_COPY_FILE_RANGE
 endif
 
+ifeq ($(HAVE_CACHESTAT),yes)
+CFILES += cachestat.c
+LCFLAGS += -DHAVE_CACHESTAT
+endif
+
 ifeq ($(ENABLE_EDITLINE),yes)
 LLDLIBS += $(LIBEDITLINE) $(LIBTERMCAP)
 endif
 
 ifeq ($(HAVE_PWRITEV2),yes)
-LCFLAGS += -DHAVE_PWRITEV2
+LCFLAGS += -DHAVE_PWRITEV2 -DHAVE_PREADV2
 endif
 
 ifeq ($(HAVE_MAP_SYNC),yes)

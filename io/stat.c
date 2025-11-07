@@ -6,11 +6,15 @@
  * Portions of statx support written by David Howells (dhowells@redhat.com)
  */
 
+#ifdef OVERRIDE_SYSTEM_STATX
+#define statx sys_statx
+#endif
+
 #include "command.h"
 #include "input.h"
 #include "init.h"
 #include "io.h"
-#include "statx.h"
+#include "libfrog/statx.h"
 #include "libxfs.h"
 #include "libfrog/logging.h"
 #include "libfrog/fsgeom.h"
@@ -94,30 +98,47 @@ print_file_info(void)
 }
 
 static void
-print_xfs_info(int verbose)
+print_extended_info(int verbose)
 {
-	struct dioattr	dio;
-	struct fsxattr	fsx, fsxa;
+	struct dioattr dio = {};
+	struct fsxattr fsx = {}, fsxa = {};
 
-	if ((xfsctl(file->name, file->fd, FS_IOC_FSGETXATTR, &fsx)) < 0 ||
-	    (xfsctl(file->name, file->fd, XFS_IOC_FSGETXATTRA, &fsxa)) < 0) {
-		perror("FS_IOC_FSGETXATTR");
-	} else {
-		printf(_("fsxattr.xflags = 0x%x "), fsx.fsx_xflags);
-		printxattr(fsx.fsx_xflags, verbose, 0, file->name, 1, 1);
-		printf(_("fsxattr.projid = %u\n"), fsx.fsx_projid);
-		printf(_("fsxattr.extsize = %u\n"), fsx.fsx_extsize);
-		printf(_("fsxattr.cowextsize = %u\n"), fsx.fsx_cowextsize);
-		printf(_("fsxattr.nextents = %u\n"), fsx.fsx_nextents);
-		printf(_("fsxattr.naextents = %u\n"), fsxa.fsx_nextents);
+	if ((ioctl(file->fd, FS_IOC_FSGETXATTR, &fsx)) < 0) {
+		if (errno != ENOTTY) {
+			perror("FS_IOC_FSGETXATTR");
+			exitcode = 1;
+		}
+		return;
 	}
+
+	printf(_("fsxattr.xflags = 0x%x "), fsx.fsx_xflags);
+	print_xflags(fsx.fsx_xflags, verbose, 0, file->name, 1, 1);
+	printf(_("fsxattr.projid = %u\n"), fsx.fsx_projid);
+	printf(_("fsxattr.extsize = %u\n"), fsx.fsx_extsize);
+	printf(_("fsxattr.cowextsize = %u\n"), fsx.fsx_cowextsize);
+	printf(_("fsxattr.nextents = %u\n"), fsx.fsx_nextents);
+
+	/* Only XFS supports FS_IOC_FSGETXATTRA and XFS_IOC_DIOINFO */
+	if (file->flags & IO_FOREIGN)
+		return;
+
+	if ((ioctl(file->fd, XFS_IOC_FSGETXATTRA, &fsxa)) < 0) {
+		perror("XFS_IOC_GETXATTRA");
+		exitcode = 1;
+		return;
+	}
+
+	printf(_("fsxattr.naextents = %u\n"), fsxa.fsx_nextents);
+
 	if ((xfsctl(file->name, file->fd, XFS_IOC_DIOINFO, &dio)) < 0) {
 		perror("XFS_IOC_DIOINFO");
-	} else {
-		printf(_("dioattr.mem = 0x%x\n"), dio.d_mem);
-		printf(_("dioattr.miniosz = %u\n"), dio.d_miniosz);
-		printf(_("dioattr.maxiosz = %u\n"), dio.d_maxiosz);
+		exitcode = 1;
+		return;
 	}
+
+	printf(_("dioattr.mem = 0x%x\n"), dio.d_mem);
+	printf(_("dioattr.miniosz = %u\n"), dio.d_miniosz);
+	printf(_("dioattr.maxiosz = %u\n"), dio.d_maxiosz);
 }
 
 int
@@ -163,10 +184,7 @@ stat_f(
 		printf(_("stat.ctime = %s"), ctime(&st.st_ctime));
 	}
 
-	if (file->flags & IO_FOREIGN)
-		return 0;
-
-	print_xfs_info(verbose);
+	print_extended_info(verbose);
 
 	return 0;
 }
@@ -287,26 +305,41 @@ statfs_f(
 	return 0;
 }
 
-static ssize_t
-_statx(
-	int		dfd,
-	const char	*filename,
-	unsigned int	flags,
-	unsigned int	mask,
-	struct statx	*buffer)
-{
-#ifdef __NR_statx
-	return syscall(__NR_statx, dfd, filename, flags, mask, buffer);
-#else
-	errno = ENOSYS;
-	return -1;
-#endif
-}
+struct statx_masks {
+	const char	*name;
+	unsigned int	mask;
+};
+
+static const struct statx_masks statx_masks[] = {
+	{"basic",		STATX_BASIC_STATS},
+	{"all",			~STATX__RESERVED},
+
+	{"type",		STATX_TYPE},
+	{"mode",		STATX_MODE},
+	{"nlink",		STATX_NLINK},
+	{"uid",			STATX_UID},
+	{"gid",			STATX_GID},
+	{"atime",		STATX_ATIME},
+	{"mtime",		STATX_MTIME},
+	{"ctime",		STATX_CTIME},
+	{"ino",			STATX_INO},
+	{"size",		STATX_SIZE},
+	{"blocks",		STATX_BLOCKS},
+	{"btime",		STATX_BTIME},
+	{"mnt_id",		STATX_MNT_ID},
+	{"dioalign",		STATX_DIOALIGN},
+	{"mnt_id_unique",	STATX_MNT_ID_UNIQUE},
+	{"subvol",		STATX_SUBVOL},
+	{"write_atomic",	STATX_WRITE_ATOMIC},
+	{"dio_read_align",	STATX_DIO_READ_ALIGN},
+};
 
 static void
 statx_help(void)
 {
-        printf(_(
+	unsigned int	i;
+
+	printf(_(
 "\n"
 " Display extended file status.\n"
 "\n"
@@ -314,10 +347,18 @@ statx_help(void)
 " -v -- More verbose output\n"
 " -r -- Print raw statx structure fields\n"
 " -m mask -- Specify the field mask for the statx call\n"
-"            (can also be 'basic' or 'all'; default STATX_ALL)\n"
+"            (can also be 'basic' or 'all'; defaults to\n"
+"             STATX_BASIC_STATS | STATX_BTIME)\n"
+" -m +mask -- Add this to the field mask for the statx call\n"
+" -m -mask -- Remove this from the field mask for the statx call\n"
 " -D -- Don't sync attributes with the server\n"
 " -F -- Force the attributes to be sync'd with the server\n"
-"\n"));
+"\n"
+"statx mask values: "));
+
+	for (i = 0; i < ARRAY_SIZE(statx_masks); i++)
+		printf("%s%s", i == 0 ? "" : ", ", statx_masks[i].name);
+	printf("\n");
 }
 
 /* statx helper */
@@ -347,7 +388,78 @@ dump_raw_statx(struct statx *stx)
 	printf("stat.rdev_minor = %u\n", stx->stx_rdev_minor);
 	printf("stat.dev_major = %u\n", stx->stx_dev_major);
 	printf("stat.dev_minor = %u\n", stx->stx_dev_minor);
+	printf("stat.mnt_id = 0x%llu\n", (unsigned long long)stx->stx_mnt_id);
+	printf("stat.dio_mem_align = %u\n", stx->stx_dio_mem_align);
+	printf("stat.dio_offset_align = %u\n", stx->stx_dio_offset_align);
+	printf("stat.subvol = 0x%llu\n", (unsigned long long)stx->stx_subvol);
+	printf("stat.atomic_write_unit_min = %u\n", stx->stx_atomic_write_unit_min);
+	printf("stat.atomic_write_unit_max = %u\n", stx->stx_atomic_write_unit_max);
+	printf("stat.atomic_write_segments_max = %u\n", stx->stx_atomic_write_segments_max);
+	printf("stat.dio_read_offset_align = %u\n", stx->stx_dio_read_offset_align);
+	printf("stat.atomic_write_unit_max_opt = %u\n", stx->stx_atomic_write_unit_max_opt);
 	return 0;
+}
+
+enum statx_mask_op {
+	SET,
+	REMOVE,
+	ADD,
+};
+
+static bool
+parse_statx_masks(
+	char			*optarg,
+	unsigned int		*caller_mask)
+{
+	char			*arg = optarg;
+	char			*word;
+	unsigned int		i;
+
+	while ((word = strtok(arg, ",")) != NULL) {
+		enum statx_mask_op op;
+		unsigned int	mask;
+		char		*p;
+
+		arg = NULL;
+
+		if (*word == '+') {
+			op = ADD;
+			word++;
+		} else if (*word == '-') {
+			op = REMOVE;
+			word++;
+		} else {
+			op = SET;
+		}
+
+		for (i = 0; i < ARRAY_SIZE(statx_masks); i++) {
+			if (!strcmp(statx_masks[i].name, word)) {
+				mask = statx_masks[i].mask;
+				goto process_op;
+			}
+		}
+
+		mask = strtoul(word, &p, 0);
+		if (!p || p == word) {
+			printf( _("non-numeric mask -- %s\n"), word);
+			return false;
+		}
+
+process_op:
+		switch (op) {
+		case ADD:
+			*caller_mask |= mask;
+			continue;
+		case REMOVE:
+			*caller_mask &= ~mask;
+			continue;
+		case SET:
+			*caller_mask = mask;
+			continue;
+		}
+	}
+
+	return true;
 }
 
 /*
@@ -362,26 +474,16 @@ statx_f(
 	char		**argv)
 {
 	int		c, verbose = 0, raw = 0;
-	char		*p;
 	struct statx	stx;
 	int		atflag = 0;
-	unsigned int	mask = STATX_ALL;
+	unsigned int	mask = STATX_BASIC_STATS | STATX_BTIME;
 
 	while ((c = getopt(argc, argv, "m:rvFD")) != EOF) {
 		switch (c) {
 		case 'm':
-			if (strcmp(optarg, "basic") == 0)
-				mask = STATX_BASIC_STATS;
-			else if (strcmp(optarg, "all") == 0)
-				mask = STATX_ALL;
-			else {
-				mask = strtoul(optarg, &p, 0);
-				if (!p || p == optarg) {
-					printf(
-				_("non-numeric mask -- %s\n"), optarg);
-					exitcode = 1;
-					return 0;
-				}
+			if (!parse_statx_masks(optarg, &mask)) {
+				exitcode = 1;
+				return 0;
 			}
 			break;
 		case 'r':
@@ -408,7 +510,7 @@ statx_f(
 		return command_usage(&statx_cmd);
 
 	memset(&stx, 0xbf, sizeof(stx));
-	if (_statx(file->fd, "", atflag | AT_EMPTY_PATH, mask, &stx) < 0) {
+	if (statx(file->fd, "", atflag | AT_EMPTY_PATH, mask, &stx) < 0) {
 		perror("statx");
 		exitcode = 1;
 		return 0;
@@ -433,10 +535,7 @@ statx_f(
 				ctime((time_t *)&stx.stx_btime.tv_sec));
 	}
 
-	if (file->flags & IO_FOREIGN)
-		return 0;
-
-	print_xfs_info(verbose);
+	print_extended_info(verbose);
 
 	return 0;
 }

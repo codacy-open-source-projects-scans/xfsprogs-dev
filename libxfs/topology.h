@@ -13,8 +13,10 @@
 struct device_topology {
 	int	logical_sector_size;	/* logical sector size */
 	int	physical_sector_size;	/* physical sector size */
-	int	sunit;		/* stripe unit */
-	int	swidth;		/* stripe width  */
+	int	sunit;			/* stripe unit */
+	int	swidth;			/* stripe width  */
+	int	awu_min;		/* min atomic write unit in bbcounts */
+	int	awu_max;		/* max atomic write unit in bbcounts */
 };
 
 struct fs_topology {
@@ -36,6 +38,9 @@ calc_default_ag_geometry(
 	int		multidisk,
 	uint64_t	*agsize,
 	uint64_t	*agcount);
+
+void calc_default_rtgroup_geometry(int blocklog, uint64_t rblocks,
+		uint64_t *rgsize, uint64_t *rgcount);
 
 extern int
 check_overwrite(

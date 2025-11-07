@@ -18,6 +18,7 @@
 #include "libfrog/bitmap.h"
 #include "libfrog/bulkstat.h"
 #include "libfrog/fakelibattr.h"
+#include "libfrog/handle_priv.h"
 #include "xfs_scrub.h"
 #include "common.h"
 #include "inodes.h"
@@ -462,6 +463,9 @@ retry_deferred_inode(
 	unsigned int		flags = 0;
 	int			error;
 
+	if (ctx->mnt.fsgeom.flags & XFS_FSOP_GEOM_FLAGS_METADIR)
+		flags |= XFS_BULK_IREQ_METADIR;
+
 	error = -xfrog_bulkstat_single(&ctx->mnt, ino, flags, &bstat);
 	if (error == ENOENT) {
 		/* Directory is gone, mark it clear. */
@@ -471,9 +475,7 @@ retry_deferred_inode(
 	if (error)
 		return error;
 
-	handle->ha_fid.fid_ino = bstat.bs_ino;
-	handle->ha_fid.fid_gen = bstat.bs_gen;
-
+	handle_from_bulkstat(handle, &bstat);
 	return check_inode_names(ncs->ctx, handle, &bstat, ncs);
 }
 
@@ -484,16 +486,13 @@ retry_deferred_inode_range(
 	uint64_t		len,
 	void			*arg)
 {
-	struct xfs_handle	handle = { };
+	struct xfs_handle	handle;
 	struct ncheck_state	*ncs = arg;
 	struct scrub_ctx	*ctx = ncs->ctx;
 	uint64_t		i;
 	int			error;
 
-	memcpy(&handle.ha_fsid, ctx->fshandle, sizeof(handle.ha_fsid));
-	handle.ha_fid.fid_len = sizeof(xfs_fid_t) -
-			sizeof(handle.ha_fid.fid_len);
-	handle.ha_fid.fid_pad = 0;
+	handle_from_fshandle(&handle, ctx->fshandle, ctx->fshandle_len);
 
 	for (i = 0; i < len; i++) {
 		error = retry_deferred_inode(ncs, &handle, ino + i);
@@ -742,6 +741,107 @@ wait:
 	return ret;
 }
 
+/* Queue one metapath scrubber. */
+static int
+queue_metapath_scan(
+	struct workqueue	*wq,
+	bool			*abortedp,
+	xfs_rgnumber_t		rgno,
+	uint64_t		type)
+{
+	struct fs_scan_item	*item;
+	struct scrub_ctx	*ctx = wq->wq_ctx;
+	int			ret;
+
+	item = malloc(sizeof(struct fs_scan_item));
+	if (!item) {
+		ret = ENOMEM;
+		str_liberror(ctx, ret, _("setting up metapath scan"));
+		return ret;
+	}
+	scrub_item_init_metapath(&item->sri, rgno, type);
+	scrub_item_schedule(&item->sri, XFS_SCRUB_TYPE_METAPATH);
+	item->abortedp = abortedp;
+
+	ret = -workqueue_add(wq, fs_scan_worker, 0, item);
+	if (ret)
+		str_liberror(ctx, ret, _("queuing metapath scan work"));
+
+	return ret;
+}
+
+/*
+ * Scrub metadata directory file paths to ensure that fs metadata are still
+ * connected where the fs needs to find them.
+ */
+static int
+run_kernel_metadir_path_scrubbers(
+	struct scrub_ctx	*ctx)
+{
+	struct workqueue	wq;
+	const struct xfrog_scrub_descr	*sc;
+	uint64_t		type;
+	unsigned int		nr_threads = scrub_nproc_workqueue(ctx);
+	xfs_rgnumber_t		rgno;
+	bool			aborted = false;
+	int			ret, ret2;
+
+	ret = -workqueue_create(&wq, (struct xfs_mount *)ctx, nr_threads);
+	if (ret) {
+		str_liberror(ctx, ret, _("setting up metapath scan workqueue"));
+		return ret;
+	}
+
+	/*
+	 * Scan all the metadata files in parallel if metadata directories
+	 * are enabled, because the phase 3 scrubbers might have taken out
+	 * parts of the metadir tree.
+	 */
+	for (type = 0; type < XFS_SCRUB_METAPATH_NR; type++) {
+		sc = &xfrog_metapaths[type];
+		if (sc->group != XFROG_SCRUB_GROUP_FS)
+			continue;
+
+		ret = queue_metapath_scan(&wq, &aborted, 0, type);
+		if (ret) {
+			str_liberror(ctx, ret,
+ _("queueing metapath scrub work"));
+			goto wait;
+		}
+	}
+
+	/* Scan all rtgroup metadata files */
+	for (rgno = 0;
+	     rgno < ctx->mnt.fsgeom.rgcount && !aborted;
+	     rgno++) {
+		for (type = 0; type < XFS_SCRUB_METAPATH_NR; type++) {
+			sc = &xfrog_metapaths[type];
+			if (sc->group != XFROG_SCRUB_GROUP_RTGROUP)
+				continue;
+
+			ret = queue_metapath_scan(&wq, &aborted, rgno, type);
+			if (ret) {
+				str_liberror(ctx, ret,
+  _("queueing metapath scrub work"));
+				goto wait;
+			}
+		}
+	}
+
+wait:
+	ret2 = -workqueue_terminate(&wq);
+	if (ret2) {
+		str_liberror(ctx, ret2, _("joining metapath scan workqueue"));
+		if (!ret)
+			ret = ret2;
+	}
+	if (aborted && !ret)
+		ret = ECANCELED;
+
+	workqueue_destroy(&wq);
+	return ret;
+}
+
 /* Check directory connectivity. */
 int
 phase5_func(
@@ -750,6 +850,16 @@ phase5_func(
 	struct ncheck_state	ncs = { .ctx = ctx };
 	int			ret;
 
+	/*
+	 * Make sure metadata files are still connected to the metadata
+	 * directory tree now that phase 3 pruned all corrupt directory tree
+	 * links.
+	 */
+	if (ctx->mnt.fsgeom.flags & XFS_FSOP_GEOM_FLAGS_METADIR) {
+		ret = run_kernel_metadir_path_scrubbers(ctx);
+		if (ret)
+			return ret;
+	}
 
 	/*
 	 * Check and fix anything that requires a full filesystem scan.  We do
@@ -772,7 +882,7 @@ _("Filesystem has errors, skipping connectivity checks."));
 
 	pthread_mutex_init(&ncs.lock, NULL);
 
-	ret = scrub_scan_all_inodes(ctx, check_inode_names, &ncs);
+	ret = scrub_scan_user_files(ctx, check_inode_names, &ncs);
 	if (ret)
 		goto out_lock;
 	if (ncs.aborted) {
@@ -802,8 +912,12 @@ phase5_estimate(
 	unsigned int		*nr_threads,
 	int			*rshift)
 {
+	unsigned int		scans = 2;
+
 	*items = scrub_estimate_iscan_work(ctx);
-	*nr_threads = scrub_nproc(ctx) * 2;
+	if (ctx->mnt.fsgeom.flags & XFS_FSOP_GEOM_FLAGS_METADIR)
+		scans++;
+	*nr_threads = scrub_nproc(ctx) * scans;
 	*rshift = 0;
 	return 0;
 }

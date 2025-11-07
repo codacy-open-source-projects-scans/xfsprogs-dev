@@ -136,10 +136,12 @@ scan_lbtree(
 				xfs_extnum_t		*nex,
 				blkmap_t		**blkmapp,
 				bmap_cursor_t		*bm_cursor,
+				int			suspect,
 				int			isroot,
 				int			check_dups,
 				int			*dirty,
-				uint64_t		magic),
+				uint64_t		magic,
+				void			*priv),
 	int		type,
 	int		whichfork,
 	xfs_ino_t	ino,
@@ -147,9 +149,11 @@ scan_lbtree(
 	xfs_extnum_t	*nex,
 	blkmap_t	**blkmapp,
 	bmap_cursor_t	*bm_cursor,
+	int		suspect,
 	int		isroot,
 	int		check_dups,
 	uint64_t	magic,
+	void		*priv,
 	const struct xfs_buf_ops *ops)
 {
 	struct xfs_buf	*bp;
@@ -164,6 +168,12 @@ scan_lbtree(
 			XFS_FSB_TO_AGNO(mp, root),
 			XFS_FSB_TO_AGBNO(mp, root));
 		return(1);
+	}
+	if (bp->b_error == -EFSBADCRC || bp->b_error == -EFSCORRUPTED) {
+		do_warn(_("btree block %d/%d is suspect, error %d\n"),
+			XFS_FSB_TO_AGNO(mp, root),
+			XFS_FSB_TO_AGBNO(mp, root), bp->b_error);
+		suspect++;
 	}
 
 	/*
@@ -180,8 +190,8 @@ scan_lbtree(
 
 	err = (*func)(XFS_BUF_TO_BLOCK(bp), nlevels - 1,
 			type, whichfork, root, ino, tot, nex, blkmapp,
-			bm_cursor, isroot, check_dups, &dirty,
-			magic);
+			bm_cursor, suspect, isroot, check_dups, &dirty,
+			magic, priv);
 
 	ASSERT(dirty == 0 || (dirty && !no_modify));
 
@@ -207,10 +217,12 @@ scan_bmapbt(
 	xfs_extnum_t		*nex,
 	blkmap_t		**blkmapp,
 	bmap_cursor_t		*bm_cursor,
+	int			suspect,
 	int			isroot,
 	int			check_dups,
 	int			*dirty,
-	uint64_t		magic)
+	uint64_t		magic,
+	void			*priv)
 {
 	int			i;
 	int			err;
@@ -224,6 +236,7 @@ scan_bmapbt(
 	xfs_agnumber_t		agno;
 	xfs_agblock_t		agbno;
 	int			state;
+	bool			zap_metadata = priv != NULL;
 
 	/*
 	 * unlike the ag freeblock btrees, if anything looks wrong
@@ -336,7 +349,7 @@ _("bad back (left) sibling pointer (saw %llu should be NULL (0))\n"
 		agno = XFS_FSB_TO_AGNO(mp, bno);
 		agbno = XFS_FSB_TO_AGBNO(mp, bno);
 
-		pthread_mutex_lock(&ag_locks[agno].lock);
+		lock_ag(agno);
 		state = get_bmap(agno, agbno);
 		switch (state) {
 		case XR_E_INUSE1:
@@ -349,7 +362,20 @@ _("bad back (left) sibling pointer (saw %llu should be NULL (0))\n"
 		case XR_E_UNKNOWN:
 		case XR_E_FREE1:
 		case XR_E_FREE:
-			set_bmap(agno, agbno, XR_E_INUSE);
+			set_bmap(agno, agbno, zap_metadata ? XR_E_METADATA :
+							     XR_E_INUSE);
+			break;
+		case XR_E_METADATA:
+			/*
+			 * bmbt block already claimed by a metadata file.  We
+			 * always reconstruct the entire metadata tree, so if
+			 * this is a regular file we mark it owned by the file.
+			 */
+			do_warn(
+_("inode 0x%" PRIx64 "bmap block 0x%" PRIx64 " claimed by metadata file\n"),
+				ino, bno);
+			if (!zap_metadata)
+				set_bmap(agno, agbno, XR_E_INUSE);
 			break;
 		case XR_E_FS_MAP:
 		case XR_E_INUSE:
@@ -361,7 +387,8 @@ _("bad back (left) sibling pointer (saw %llu should be NULL (0))\n"
 			 * we made it here, the block probably
 			 * contains btree data.
 			 */
-			set_bmap(agno, agbno, XR_E_MULT);
+			if (!zap_metadata)
+				set_bmap(agno, agbno, XR_E_MULT);
 			do_warn(
 _("inode 0x%" PRIx64 "bmap block 0x%" PRIx64 " claimed, state is %d\n"),
 				ino, bno, state);
@@ -389,7 +416,7 @@ _("bad state %d, inode %" PRIu64 " bmap block 0x%" PRIx64 "\n"),
 				state, ino, bno);
 			break;
 		}
-		pthread_mutex_unlock(&ag_locks[agno].lock);
+		unlock_ag(agno);
 	} else {
 		if (search_dup_extent(XFS_FSB_TO_AGNO(mp, bno),
 				XFS_FSB_TO_AGBNO(mp, bno),
@@ -400,11 +427,11 @@ _("bad state %d, inode %" PRIu64 " bmap block 0x%" PRIx64 "\n"),
 	numrecs = be16_to_cpu(block->bb_numrecs);
 
 	/* Record BMBT blocks in the reverse-mapping data. */
-	if (check_dups && collect_rmaps) {
+	if (check_dups && collect_rmaps && !zap_metadata) {
 		agno = XFS_FSB_TO_AGNO(mp, bno);
-		pthread_mutex_lock(&ag_locks[agno].lock);
+		lock_ag(agno);
 		rmap_add_bmbt_rec(mp, ino, whichfork, bno);
-		pthread_mutex_unlock(&ag_locks[agno].lock);
+		unlock_ag(agno);
 	}
 
 	if (level == 0) {
@@ -416,7 +443,7 @@ _("inode %" PRIu64 " bad # of bmap records (%" PRIu64 ", min - %u, max - %u)\n")
 					mp->m_bmap_dmxr[0]);
 			return(1);
 		}
-		rp = XFS_BMBT_REC_ADDR(mp, block, 1);
+		rp = xfs_bmbt_rec_addr(mp, block, 1);
 		*nex += numrecs;
 		/*
 		 * XXX - if we were going to fix up the btree record,
@@ -426,7 +453,8 @@ _("inode %" PRIu64 " bad # of bmap records (%" PRIu64 ", min - %u, max - %u)\n")
 		if (check_dups == 0)  {
 			err = process_bmbt_reclist(mp, rp, &numrecs, type, ino,
 						   tot, blkmapp, &first_key,
-						   &last_key, whichfork);
+						   &last_key, whichfork,
+						   zap_metadata);
 			if (err)
 				return 1;
 
@@ -456,7 +484,7 @@ _("out-of-order bmap key (file offset) in inode %" PRIu64 ", %s fork, fsbno %" P
 			return 0;
 		} else {
 			return scan_bmbt_reclist(mp, rp, &numrecs, type, ino,
-						 tot, whichfork);
+					tot, whichfork, zap_metadata);
 		}
 	}
 	if (numrecs > mp->m_bmap_dmxr[1] || (isroot == 0 && numrecs <
@@ -466,8 +494,8 @@ _("inode %" PRIu64 " bad # of bmap records (%" PRIu64 ", min - %u, max - %u)\n")
 			ino, numrecs, mp->m_bmap_dmnr[1], mp->m_bmap_dmxr[1]);
 		return(1);
 	}
-	pp = XFS_BMBT_PTR_ADDR(mp, block, 1, mp->m_bmap_dmxr[1]);
-	pkey = XFS_BMBT_KEY_ADDR(mp, block, 1);
+	pp = xfs_bmbt_ptr_addr(mp, block, 1, mp->m_bmap_dmxr[1]);
+	pkey = xfs_bmbt_key_addr(mp, block, 1);
 
 	last_key = NULLFILEOFF;
 
@@ -486,7 +514,7 @@ _("bad bmap btree ptr 0x%llx in ino %" PRIu64 "\n"),
 
 		err = scan_lbtree(be64_to_cpu(pp[i]), level, scan_bmapbt,
 				type, whichfork, ino, tot, nex, blkmapp,
-				bm_cursor, 0, check_dups, magic,
+				bm_cursor, suspect, 0, check_dups, magic, priv,
 				&xfs_bmbt_buf_ops);
 		if (err)
 			return(1);
@@ -554,7 +582,7 @@ _("bad fwd (right) sibling pointer (saw %" PRIu64 " should be NULLFSBLOCK)\n"
 				be64_to_cpu(pkey[numrecs - 1].br_startoff);
 	}
 
-	return(0);
+	return suspect > 0 ? 1 : 0;
 }
 
 static void
@@ -705,10 +733,11 @@ _("%s freespace btree block claimed (state %d), agno %d, bno %d, suspect %d\n"),
 			}
 
 			for ( ; b < end; b += blen)  {
-				state = get_bmap_ext(agno, b, end, &blen);
+				state = get_bmap_ext(agno, b, end, &blen, false);
 				switch (state) {
 				case XR_E_UNKNOWN:
-					set_bmap_ext(agno, b, blen, XR_E_FREE1);
+					set_bmap_ext(agno, b, blen, XR_E_FREE1,
+							false);
 					break;
 				case XR_E_FREE1:
 					/*
@@ -718,7 +747,7 @@ _("%s freespace btree block claimed (state %d), agno %d, bno %d, suspect %d\n"),
 					if (magic == XFS_ABTC_MAGIC ||
 					    magic == XFS_ABTC_CRC_MAGIC) {
 						set_bmap_ext(agno, b, blen,
-							     XR_E_FREE);
+							     XR_E_FREE, false);
 						break;
 					}
 					fallthrough;
@@ -822,29 +851,35 @@ process_rmap_rec(
 		switch (owner) {
 		case XFS_RMAP_OWN_FS:
 		case XFS_RMAP_OWN_LOG:
-			set_bmap_ext(agno, b, blen, XR_E_INUSE_FS1);
+			set_bmap_ext(agno, b, blen, XR_E_INUSE_FS1, false);
 			break;
 		case XFS_RMAP_OWN_AG:
 		case XFS_RMAP_OWN_INOBT:
-			set_bmap_ext(agno, b, blen, XR_E_FS_MAP1);
+			set_bmap_ext(agno, b, blen, XR_E_FS_MAP1, false);
 			break;
 		case XFS_RMAP_OWN_INODES:
-			set_bmap_ext(agno, b, blen, XR_E_INO1);
+			set_bmap_ext(agno, b, blen, XR_E_INO1, false);
 			break;
 		case XFS_RMAP_OWN_REFC:
-			set_bmap_ext(agno, b, blen, XR_E_REFC);
+			set_bmap_ext(agno, b, blen, XR_E_REFC, false);
 			break;
 		case XFS_RMAP_OWN_COW:
-			set_bmap_ext(agno, b, blen, XR_E_COW);
+			set_bmap_ext(agno, b, blen, XR_E_COW, false);
 			break;
 		case XFS_RMAP_OWN_NULL:
 			/* still unknown */
 			break;
 		default:
 			/* file data */
-			set_bmap_ext(agno, b, blen, XR_E_INUSE1);
+			set_bmap_ext(agno, b, blen, XR_E_INUSE1, false);
 			break;
 		}
+		break;
+	case XR_E_METADATA:
+		do_warn(
+_("Metadata file block (%d,%d-%d) mismatch in %s tree, state - %d,%" PRIx64 "\n"),
+			agno, b, b + blen - 1,
+			name, state, owner);
 		break;
 	case XR_E_INUSE_FS:
 		if (owner == XFS_RMAP_OWN_FS ||
@@ -913,13 +948,6 @@ _("unknown block (%d,%d-%d) mismatch on %s tree, state - %d,%" PRIx64 "\n"),
 		break;
 	}
 }
-
-struct rmap_priv {
-	struct aghdr_cnts	*agcnts;
-	struct xfs_rmap_irec	high_key;
-	struct xfs_rmap_irec	last_rec;
-	xfs_agblock_t		nr_blocks;
-};
 
 static bool
 rmap_in_order(
@@ -1182,7 +1210,8 @@ advance:
 
 			/* Check for block owner collisions. */
 			for ( ; b < end; b += blen)  {
-				state = get_bmap_ext(agno, b, end, &blen);
+				state = get_bmap_ext(agno, b, end, &blen,
+						false);
 				process_rmap_rec(mp, agno, b, end, blen, owner,
 						state, name);
 			}
@@ -1319,14 +1348,402 @@ _("out of order key %u in %s btree block (%u/%u)\n"),
 
 out:
 	if (suspect)
-		rmap_avoid_check();
+		rmap_avoid_check(mp);
 }
 
-struct refc_priv {
-	struct xfs_refcount_irec	last_rec;
-	xfs_agblock_t			nr_blocks;
-};
+int
+process_rtrmap_reclist(
+	struct xfs_mount	*mp,
+	struct xfs_rmap_rec	*rp,
+	int			numrecs,
+	struct xfs_rmap_irec	*last_rec,
+	struct xfs_rmap_irec	*high_key,
+	const char		*name)
+{
+	int			suspect = 0;
+	int			i;
+	struct xfs_rmap_irec	oldkey;
+	struct xfs_rmap_irec	key;
 
+	for (i = 0; i < numrecs; i++) {
+		xfs_rgblock_t		b, end;
+		xfs_extlen_t		len;
+		uint64_t		owner, offset;
+
+		b = be32_to_cpu(rp[i].rm_startblock);
+		len = be32_to_cpu(rp[i].rm_blockcount);
+		owner = be64_to_cpu(rp[i].rm_owner);
+		offset = be64_to_cpu(rp[i].rm_offset);
+
+		key.rm_flags = 0;
+		key.rm_startblock = b;
+		key.rm_blockcount = len;
+		key.rm_owner = owner;
+		if (libxfs_rmap_irec_offset_unpack(offset, &key)) {
+			/* Look for impossible flags. */
+			do_warn(
+_("invalid flags in record %u of %s\n"),
+				i, name);
+			suspect++;
+			continue;
+		}
+
+
+		end = key.rm_startblock + key.rm_blockcount;
+
+		/* Make sure startblock & len make sense. */
+		if (b >= mp->m_groups[XG_TYPE_RTG].blocks) {
+			do_warn(
+_("invalid start block %llu in record %u of %s\n"),
+				(unsigned long long)b, i, name);
+			suspect++;
+			continue;
+		}
+		if (len == 0 || end - 1 >= mp->m_groups[XG_TYPE_RTG].blocks) {
+			do_warn(
+_("invalid length %llu in record %u of %s\n"),
+				(unsigned long long)len, i, name);
+			suspect++;
+			continue;
+		}
+
+		/*
+		 * We only store file data, COW data, and superblocks in the
+		 * rtrmap.
+		 */
+		if (owner == XFS_RMAP_OWN_COW) {
+			if (!xfs_has_reflink(mp)) {
+				do_warn(
+_("invalid CoW staging extent in record %u of %s\n"),
+						i, name);
+				suspect++;
+				continue;
+			}
+		} else if (XFS_RMAP_NON_INODE_OWNER(owner) &&
+			   owner != XFS_RMAP_OWN_FS) {
+			do_warn(
+_("invalid owner %lld in record %u of %s\n"),
+				(long long int)owner, i, name);
+			suspect++;
+			continue;
+		}
+
+		/* Look for impossible record field combinations. */
+		if (key.rm_flags & XFS_RMAP_KEY_FLAGS) {
+			do_warn(
+_("record %d cannot have attr fork/key flags in %s\n"),
+					i, name);
+			suspect++;
+			continue;
+		}
+
+		/* Check for out of order records. */
+		if (i == 0)
+			oldkey = key;
+		else {
+			if (rmap_diffkeys(&oldkey, &key) > 0)
+				do_warn(
+_("out-of-order record %d (%llu %"PRId64" %"PRIu64" %llu) in %s\n"),
+				i, (unsigned long long)b, owner, offset,
+				(unsigned long long)len, name);
+			else
+				oldkey = key;
+		}
+
+		/* Is this mergeable with the previous record? */
+		if (rmaps_are_mergeable(last_rec, &key)) {
+			do_warn(
+_("record %d in %s should be merged with previous record\n"),
+				i, name);
+			last_rec->rm_blockcount += key.rm_blockcount;
+		} else
+			*last_rec = key;
+
+		/* Check that we don't go past the high key. */
+		key.rm_startblock += key.rm_blockcount - 1;
+		key.rm_offset += key.rm_blockcount - 1;
+		key.rm_blockcount = 0;
+		if (high_key && rmap_diffkeys(&key, high_key) > 0) {
+			do_warn(
+_("record %d greater than high key of %s\n"),
+				i, name);
+			suspect++;
+		}
+	}
+
+	return suspect;
+}
+
+int
+scan_rtrmapbt(
+	struct xfs_btree_block	*block,
+	int			level,
+	int			type,
+	int			whichfork,
+	xfs_fsblock_t		fsbno,
+	xfs_ino_t		ino,
+	xfs_rfsblock_t		*tot,
+	uint64_t		*nex,
+	blkmap_t		**blkmapp,
+	bmap_cursor_t		*bm_cursor,
+	int			suspect,
+	int			isroot,
+	int			check_dups,
+	int			*dirty,
+	uint64_t		magic,
+	void			*priv)
+{
+	const char		*name = "rtrmap";
+	char			rootname[256];
+	int			i;
+	xfs_rtrmap_ptr_t	*pp;
+	struct xfs_rmap_rec	*rp;
+	struct rmap_priv	*rmap_priv = priv;
+	int			hdr_errors = 0;
+	int			numrecs;
+	int			state;
+	struct xfs_rmap_key	*kp;
+	struct xfs_rmap_irec	oldkey;
+	struct xfs_rmap_irec	key;
+	xfs_agnumber_t		agno;
+	xfs_agblock_t		agbno;
+	int			error;
+
+	agno = XFS_FSB_TO_AGNO(mp, fsbno);
+	agbno = XFS_FSB_TO_AGBNO(mp, fsbno);
+
+	/* If anything here is bad, just bail. */
+	if (be32_to_cpu(block->bb_magic) != magic) {
+		do_warn(
+_("bad magic # %#x in inode %" PRIu64 " %s block %" PRIu64 "\n"),
+			be32_to_cpu(block->bb_magic), ino, name, fsbno);
+		return 1;
+	}
+	if (be16_to_cpu(block->bb_level) != level) {
+		do_warn(
+_("expected level %d got %d in inode %" PRIu64 ", %s block %" PRIu64 "\n"),
+			level, be16_to_cpu(block->bb_level),
+			ino, name, fsbno);
+		return(1);
+	}
+
+	/* verify owner */
+	if (be64_to_cpu(block->bb_u.l.bb_owner) != ino) {
+		do_warn(
+_("expected owner inode %" PRIu64 ", got %llu, %s block %" PRIu64 "\n"),
+			ino,
+			(unsigned long long)be64_to_cpu(block->bb_u.l.bb_owner),
+			name, fsbno);
+		return 1;
+	}
+	/* verify block number */
+	if (be64_to_cpu(block->bb_u.l.bb_blkno) !=
+	    XFS_FSB_TO_DADDR(mp, fsbno)) {
+		do_warn(
+_("expected block %" PRIu64 ", got %llu, %s block %" PRIu64 "\n"),
+			XFS_FSB_TO_DADDR(mp, fsbno),
+			(unsigned long long)be64_to_cpu(block->bb_u.l.bb_blkno),
+			name, fsbno);
+		return 1;
+	}
+	/* verify uuid */
+	if (platform_uuid_compare(&block->bb_u.l.bb_uuid,
+				  &mp->m_sb.sb_meta_uuid) != 0) {
+		do_warn(
+_("wrong FS UUID, %s block %" PRIu64 "\n"),
+			name, fsbno);
+		return 1;
+	}
+
+	/*
+	 * Check for btree blocks multiply claimed.  We're going to regenerate
+	 * the rtrmap anyway, so mark the blocks as metadata so they get freed.
+	 */
+	state = get_bmap(agno, agbno);
+	if (!(state == XR_E_UNKNOWN || state == XR_E_INUSE1))  {
+		do_warn(
+_("%s btree block claimed (state %d), agno %d, bno %d, suspect %d\n"),
+				name, state, agno, agbno, suspect);
+		suspect++;
+		goto out;
+	}
+	set_bmap(agno, agbno, XR_E_METADATA);
+
+	numrecs = be16_to_cpu(block->bb_numrecs);
+
+	/*
+	 * All realtime rmap btree blocks are freed for a fully empty
+	 * filesystem, thus they are counted towards the free data
+	 * block counter.  The root lives in an inode and is thus not
+	 * counted.
+	 */
+	(*tot)++;
+
+	if (level == 0) {
+		if (numrecs > mp->m_rtrmap_mxr[0])  {
+			numrecs = mp->m_rtrmap_mxr[0];
+			hdr_errors++;
+		}
+		if (isroot == 0 && numrecs < mp->m_rtrmap_mnr[0])  {
+			numrecs = mp->m_rtrmap_mnr[0];
+			hdr_errors++;
+		}
+
+		if (hdr_errors) {
+			do_warn(
+_("bad btree nrecs (%u, min=%u, max=%u) in bt%s block %u/%u\n"),
+				be16_to_cpu(block->bb_numrecs),
+				mp->m_rtrmap_mnr[0], mp->m_rtrmap_mxr[0],
+				name, agno, agbno);
+			suspect++;
+		}
+
+		rp = xfs_rtrmap_rec_addr(block, 1);
+		snprintf(rootname, 256, "%s btree block %u/%u", name, agno, agbno);
+		error = process_rtrmap_reclist(mp, rp, numrecs,
+				&rmap_priv->last_rec, &rmap_priv->high_key,
+				rootname);
+		if (error)
+			suspect++;
+		goto out;
+	}
+
+	/*
+	 * interior record
+	 */
+	pp = xfs_rtrmap_ptr_addr(block, 1, mp->m_rtrmap_mxr[1]);
+
+	if (numrecs > mp->m_rtrmap_mxr[1])  {
+		numrecs = mp->m_rtrmap_mxr[1];
+		hdr_errors++;
+	}
+	if (isroot == 0 && numrecs < mp->m_rtrmap_mnr[1])  {
+		numrecs = mp->m_rtrmap_mnr[1];
+		hdr_errors++;
+	}
+
+	/*
+	 * don't pass bogus tree flag down further if this block
+	 * looked ok.  bail out if two levels in a row look bad.
+	 */
+	if (hdr_errors)  {
+		do_warn(
+_("bad btree nrecs (%u, min=%u, max=%u) in bt%s block %u/%u\n"),
+			be16_to_cpu(block->bb_numrecs),
+			mp->m_rtrmap_mnr[1], mp->m_rtrmap_mxr[1],
+			name, agno, agbno);
+		if (suspect)
+			goto out;
+		suspect++;
+	} else if (suspect) {
+		suspect = 0;
+	}
+
+	/* check the node's high keys */
+	for (i = 0; !isroot && i < numrecs; i++) {
+		kp = xfs_rtrmap_high_key_addr(block, i + 1);
+
+		key.rm_flags = 0;
+		key.rm_startblock = be32_to_cpu(kp->rm_startblock);
+		key.rm_owner = be64_to_cpu(kp->rm_owner);
+		if (libxfs_rmap_irec_offset_unpack(be64_to_cpu(kp->rm_offset),
+				&key)) {
+			/* Look for impossible flags. */
+			do_warn(
+_("invalid flags in key %u of %s btree block %u/%u\n"),
+				i, name, agno, agbno);
+			suspect++;
+			continue;
+		}
+		if (rmap_diffkeys(&key, &rmap_priv->high_key) > 0) {
+			do_warn(
+_("key %d greater than high key of block (%u/%u) in %s tree\n"),
+				i, agno, agbno, name);
+			suspect++;
+		}
+	}
+
+	/* check for in-order keys */
+	for (i = 0; i < numrecs; i++)  {
+		kp = xfs_rtrmap_key_addr(block, i + 1);
+
+		key.rm_flags = 0;
+		key.rm_startblock = be32_to_cpu(kp->rm_startblock);
+		key.rm_owner = be64_to_cpu(kp->rm_owner);
+		if (libxfs_rmap_irec_offset_unpack(be64_to_cpu(kp->rm_offset),
+				&key)) {
+			/* Look for impossible flags. */
+			do_warn(
+_("invalid flags in key %u of %s btree block %u/%u\n"),
+				i, name, agno, agbno);
+			suspect++;
+			continue;
+		}
+		if (i == 0) {
+			oldkey = key;
+			continue;
+		}
+		if (rmap_diffkeys(&oldkey, &key) > 0) {
+			do_warn(
+_("out of order key %u in %s btree block (%u/%u)\n"),
+				i, name, agno, agbno);
+			suspect++;
+		}
+		oldkey = key;
+	}
+
+	for (i = 0; i < numrecs; i++)  {
+		xfs_fsblock_t		pbno = be64_to_cpu(pp[i]);
+
+		/*
+		 * XXX - put sibling detection right here.
+		 * we know our sibling chain is good.  So as we go,
+		 * we check the entry before and after each entry.
+		 * If either of the entries references a different block,
+		 * check the sibling pointer.  If there's a sibling
+		 * pointer mismatch, try and extract as much data
+		 * as possible.
+		 */
+		kp = xfs_rtrmap_high_key_addr(block, i + 1);
+		rmap_priv->high_key.rm_flags = 0;
+		rmap_priv->high_key.rm_startblock =
+				be32_to_cpu(kp->rm_startblock);
+		rmap_priv->high_key.rm_owner =
+				be64_to_cpu(kp->rm_owner);
+		if (libxfs_rmap_irec_offset_unpack(be64_to_cpu(kp->rm_offset),
+				&rmap_priv->high_key)) {
+			/* Look for impossible flags. */
+			do_warn(
+_("invalid flags in high key %u of %s btree block %u/%u\n"),
+				i, name, agno, agbno);
+			suspect++;
+			continue;
+		}
+
+		if (!libxfs_verify_fsbno(mp, pbno)) {
+			do_warn(
+_("bad %s btree ptr 0x%llx in ino %" PRIu64 "\n"),
+			       name, (unsigned long long)pbno, ino);
+			return 1;
+		}
+
+		error = scan_lbtree(pbno, level, scan_rtrmapbt,
+				type, whichfork, ino, tot, nex, blkmapp,
+				bm_cursor, suspect, 0, check_dups, magic,
+				rmap_priv, &xfs_rtrmapbt_buf_ops);
+		if (error) {
+			suspect++;
+			goto out;
+		}
+	}
+
+out:
+	if (hdr_errors || suspect) {
+		rmap_avoid_check(mp);
+		return 1;
+	}
+	return 0;
+}
 
 static void
 scan_refcbt(
@@ -1458,14 +1875,16 @@ _("leftover CoW extent has invalid startblock in record %u of %s btree block %u/
 				xfs_extlen_t	cnr;
 
 				for (c = agb; c < end; c += cnr) {
-					state = get_bmap_ext(agno, c, end, &cnr);
+					state = get_bmap_ext(agno, c, end, &cnr,
+							false);
 					switch (state) {
 					case XR_E_UNKNOWN:
 					case XR_E_COW:
 						do_warn(
 _("leftover CoW extent (%u/%u) len %u\n"),
 						agno, c, cnr);
-						set_bmap_ext(agno, c, cnr, XR_E_FREE);
+						set_bmap_ext(agno, c, cnr,
+							XR_E_FREE, false);
 						break;
 					default:
 						do_warn(
@@ -1474,7 +1893,7 @@ _("extent (%u/%u) len %u claimed, state is %d\n"),
 						break;
 					}
 				}
-			} else if (nr < 2 || nr > MAXREFCOUNT) {
+			} else if (nr < 2 || nr > XFS_REFC_REFCOUNT_MAX) {
 				do_warn(
 	_("invalid reference count %u in record %u of %s btree block %u/%u\n"),
 					nr, i, name, agno, bno);
@@ -1561,8 +1980,316 @@ _("extent (%u/%u) len %u claimed, state is %d\n"),
 	libxfs_perag_put(pag);
 out:
 	if (suspect)
-		refcount_avoid_check();
+		refcount_avoid_check(mp);
 	return;
+}
+
+
+int
+process_rtrefc_reclist(
+	struct xfs_mount	*mp,
+	struct xfs_refcount_rec	*rp,
+	int			numrecs,
+	struct refc_priv	*refc_priv,
+	const char		*name)
+{
+	struct xfs_rtgroup	*rtg;
+	xfs_rgnumber_t		rgno = refc_priv->rgno;
+	xfs_rtblock_t		lastblock = 0;
+	int			state;
+	int			suspect = 0;
+	int			i;
+
+	rtg = libxfs_rtgroup_get(mp, rgno);
+	if (!rtg) {
+		if (numrecs) {
+			do_warn(
+_("no rt group 0x%x but %d rtrefcount records\n"),
+					rgno, numrecs);
+			suspect++;
+		}
+
+		return suspect;
+	}
+
+	for (i = 0; i < numrecs; i++) {
+		enum xfs_refc_domain	domain;
+		xfs_rgblock_t		b, rgbno, end;
+		xfs_extlen_t		len;
+		xfs_nlink_t		nr;
+
+		b = rgbno = be32_to_cpu(rp[i].rc_startblock);
+		len = be32_to_cpu(rp[i].rc_blockcount);
+		nr = be32_to_cpu(rp[i].rc_refcount);
+
+		if (b & XFS_REFC_COWFLAG) {
+			domain = XFS_REFC_DOMAIN_COW;
+			rgbno &= ~XFS_REFC_COWFLAG;
+		} else {
+			domain = XFS_REFC_DOMAIN_SHARED;
+		}
+
+		if (domain == XFS_REFC_DOMAIN_COW && nr != 1) {
+			do_warn(
+_("leftover rt CoW extent has incorrect refcount in record %u of %s\n"),
+					i, name);
+			suspect++;
+		}
+		if (nr == 1) {
+			if (domain != XFS_REFC_DOMAIN_COW) {
+				do_warn(
+_("leftover rt CoW extent has invalid startblock in record %u of %s\n"),
+					i, name);
+				suspect++;
+			}
+		}
+		end = rgbno + len;
+
+		if (!libxfs_verify_rgbno(rtg, rgbno)) {
+			do_warn(
+_("invalid start block %llu in record %u of %s\n"),
+					(unsigned long long)b, i, name);
+			suspect++;
+			continue;
+		}
+
+		if (len == 0 || end <= rgbno ||
+		    !libxfs_verify_rgbno(rtg, end - 1)) {
+			do_warn(
+_("invalid length %llu in record %u of %s\n"),
+					(unsigned long long)len, i, name);
+			suspect++;
+			continue;
+		}
+
+		if (nr < 2 || nr > XFS_REFC_REFCOUNT_MAX) {
+			do_warn(
+_("invalid rt reference count %u in record %u of %s\n"),
+					nr, i, name);
+			suspect++;
+			continue;
+		}
+
+		if (nr == 1) {
+			xfs_rgblock_t		b;
+			xfs_extlen_t		blen;
+
+			for (b = rgbno; b < end; b += len) {
+				state = get_bmap_ext(rgno, b, end, &blen, true);
+				blen = min(blen, len);
+
+				switch (state) {
+				case XR_E_UNKNOWN:
+				case XR_E_COW:
+					do_warn(
+_("leftover rt CoW rtextent (%llu)\n"),
+						(unsigned long long)rgbno);
+					set_bmap_ext(rgno, b, len, XR_E_FREE,
+							true);
+					break;
+				default:
+					do_warn(
+_("rtextent (%llu) claimed, state is %d\n"),
+						(unsigned long long)rgbno, state);
+					break;
+				}
+				suspect++;
+			}
+		}
+
+		if (b && b <= lastblock) {
+			do_warn(_(
+"out-of-order %s btree record %d (%llu %llu) in %s\n"),
+					name, i, (unsigned long long)b,
+					(unsigned long long)len, name);
+			suspect++;
+		} else {
+			lastblock = end - 1;
+		}
+
+		/* Is this record mergeable with the last one? */
+		if (refc_priv->last_rec.rc_domain == domain &&
+		    refc_priv->last_rec.rc_startblock +
+		    refc_priv->last_rec.rc_blockcount == rgbno &&
+		    refc_priv->last_rec.rc_refcount == nr) {
+			do_warn(
+_("record %d of %s tree should be merged with previous record\n"),
+					i, name);
+			suspect++;
+			refc_priv->last_rec.rc_blockcount += len;
+		} else {
+			refc_priv->last_rec.rc_domain = domain;
+			refc_priv->last_rec.rc_startblock = rgbno;
+			refc_priv->last_rec.rc_blockcount = len;
+			refc_priv->last_rec.rc_refcount = nr;
+		}
+
+		/* XXX: probably want to mark the reflinked areas? */
+	}
+
+	libxfs_rtgroup_put(rtg);
+	return suspect;
+}
+
+int
+scan_rtrefcbt(
+	struct xfs_btree_block		*block,
+	int				level,
+	int				type,
+	int				whichfork,
+	xfs_fsblock_t			fsbno,
+	xfs_ino_t			ino,
+	xfs_rfsblock_t			*tot,
+	uint64_t			*nex,
+	struct blkmap			**blkmapp,
+	bmap_cursor_t			*bm_cursor,
+	int				suspect,
+	int				isroot,
+	int				check_dups,
+	int				*dirty,
+	uint64_t			magic,
+	void				*priv)
+{
+	const char			*name = "rtrefcount";
+	char				rootname[256];
+	int				i;
+	xfs_rtrefcount_ptr_t		*pp;
+	struct xfs_refcount_rec	*rp;
+	struct refc_priv		*refc_priv = priv;
+	int				hdr_errors = 0;
+	int				numrecs;
+	int				state;
+	xfs_agnumber_t			agno;
+	xfs_agblock_t			agbno;
+	int				error;
+
+	agno = XFS_FSB_TO_AGNO(mp, fsbno);
+	agbno = XFS_FSB_TO_AGBNO(mp, fsbno);
+
+	if (magic != XFS_RTREFC_CRC_MAGIC) {
+		name = "(unknown)";
+		hdr_errors++;
+		suspect++;
+		goto out;
+	}
+
+	if (be32_to_cpu(block->bb_magic) != magic) {
+		do_warn(_("bad magic # %#x in %s btree block %d/%d\n"),
+				be32_to_cpu(block->bb_magic), name, agno,
+				agbno);
+		hdr_errors++;
+		if (suspect)
+			goto out;
+	}
+
+	if (be16_to_cpu(block->bb_level) != level) {
+		do_warn(_("expected level %d got %d in %s btree block %d/%d\n"),
+				level, be16_to_cpu(block->bb_level), name,
+				agno, agbno);
+		hdr_errors++;
+		if (suspect)
+			goto out;
+	}
+
+	refc_priv->nr_blocks++;
+
+	/*
+	 * Check for btree blocks multiply claimed.  We're going to regenerate
+	 * the btree anyway, so mark the blocks as metadata so they get freed.
+	 */
+	state = get_bmap(agno, agbno);
+	if (!(state == XR_E_UNKNOWN || state == XR_E_INUSE1))  {
+		do_warn(
+_("%s btree block claimed (state %d), agno %d, agbno %d, suspect %d\n"),
+				name, state, agno, agbno, suspect);
+		goto out;
+	}
+	set_bmap(agno, agbno, XR_E_METADATA);
+
+	numrecs = be16_to_cpu(block->bb_numrecs);
+	if (level == 0) {
+		if (numrecs > mp->m_rtrefc_mxr[0])  {
+			numrecs = mp->m_rtrefc_mxr[0];
+			hdr_errors++;
+		}
+		if (isroot == 0 && numrecs < mp->m_rtrefc_mnr[0])  {
+			numrecs = mp->m_rtrefc_mnr[0];
+			hdr_errors++;
+		}
+
+		if (hdr_errors) {
+			do_warn(
+	_("bad btree nrecs (%u, min=%u, max=%u) in %s btree block %u/%u\n"),
+					be16_to_cpu(block->bb_numrecs),
+					mp->m_rtrefc_mnr[0],
+					mp->m_rtrefc_mxr[0], name, agno, agbno);
+			suspect++;
+		}
+
+		rp = xfs_rtrefcount_rec_addr(block, 1);
+		snprintf(rootname, 256, "%s btree block %u/%u", name, agno,
+				agbno);
+		error = process_rtrefc_reclist(mp, rp, numrecs, refc_priv,
+				rootname);
+		if (error)
+			suspect++;
+		goto out;
+	}
+
+	/*
+	 * interior record
+	 */
+	pp = xfs_rtrefcount_ptr_addr(block, 1, mp->m_rtrefc_mxr[1]);
+
+	if (numrecs > mp->m_rtrefc_mxr[1])  {
+		numrecs = mp->m_rtrefc_mxr[1];
+		hdr_errors++;
+	}
+	if (isroot == 0 && numrecs < mp->m_rtrefc_mnr[1])  {
+		numrecs = mp->m_rtrefc_mnr[1];
+		hdr_errors++;
+	}
+
+	/*
+	 * don't pass bogus tree flag down further if this block
+	 * looked ok.  bail out if two levels in a row look bad.
+	 */
+	if (hdr_errors)  {
+		do_warn(
+	_("bad btree nrecs (%u, min=%u, max=%u) in %s btree block %u/%u\n"),
+				be16_to_cpu(block->bb_numrecs),
+				mp->m_rtrefc_mnr[1], mp->m_rtrefc_mxr[1], name,
+				agno, agbno);
+		if (suspect)
+			goto out;
+		suspect++;
+	} else if (suspect) {
+		suspect = 0;
+	}
+
+	for (i = 0; i < numrecs; i++)  {
+		xfs_fsblock_t		pbno = be64_to_cpu(pp[i]);
+
+		if (!libxfs_verify_fsbno(mp, pbno)) {
+			do_warn(
+	_("bad btree pointer (%u) in %sbt block %u/%u\n"),
+					agbno, name, agno, agbno);
+			suspect++;
+			return 0;
+		}
+
+		scan_lbtree(pbno, level, scan_rtrefcbt, type, whichfork, ino,
+				tot, nex, blkmapp, bm_cursor, suspect, 0,
+				check_dups, magic, refc_priv,
+				&xfs_rtrefcountbt_buf_ops);
+	}
+out:
+	if (suspect) {
+		refcount_avoid_check(mp);
+		return 1;
+	}
+
+	return 0;
 }
 
 /*
@@ -2397,7 +3124,7 @@ validate_agf(
 		if (levels == 0 || levels > mp->m_rmap_maxlevels) {
 			do_warn(_("bad levels %u for rmapbt root, agno %d\n"),
 				levels, agno);
-			rmap_avoid_check();
+			rmap_avoid_check(mp);
 		}
 
 		bno = be32_to_cpu(agf->agf_rmap_root);
@@ -2412,7 +3139,7 @@ validate_agf(
 		} else {
 			do_warn(_("bad agbno %u for rmapbt root, agno %d\n"),
 				bno, agno);
-			rmap_avoid_check();
+			rmap_avoid_check(mp);
 		}
 	}
 
@@ -2421,7 +3148,7 @@ validate_agf(
 		if (levels == 0 || levels > mp->m_refc_maxlevels) {
 			do_warn(_("bad levels %u for refcountbt root, agno %d\n"),
 				levels, agno);
-			refcount_avoid_check();
+			refcount_avoid_check(mp);
 		}
 
 		bno = be32_to_cpu(agf->agf_refcount_root);
@@ -2439,7 +3166,7 @@ validate_agf(
 		} else {
 			do_warn(_("bad agbno %u for refcntbt root, agno %d\n"),
 				bno, agno);
-			refcount_avoid_check();
+			refcount_avoid_check(mp);
 		}
 	}
 

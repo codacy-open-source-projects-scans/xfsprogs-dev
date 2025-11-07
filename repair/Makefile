@@ -73,12 +73,15 @@ CFILES = \
 	rcbag.c \
 	rmap.c \
 	rt.c \
+	rtrefcount_repair.c \
+	rtrmap_repair.c \
 	sb.c \
 	scan.c \
 	slab.c \
 	strblobs.c \
 	threads.c \
 	versions.c \
+	zoned.c \
 	xfs_repair.c
 
 LLDLIBS = $(LIBXFS) $(LIBXLOG) $(LIBXCMD) $(LIBFROG) $(LIBUUID) $(LIBRT) \

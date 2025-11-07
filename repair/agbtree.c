@@ -166,8 +166,7 @@ finish_rebuild(
 		if (resv->used == resv->len)
 			continue;
 
-		fsbno = XFS_AGB_TO_FSB(mp, resv->pag->pag_agno,
-				resv->agbno + resv->used);
+		fsbno = xfs_agbno_to_fsb(resv->pag, resv->agbno + resv->used);
 		error = bitmap_set(lost_blocks, fsbno, resv->len - resv->used);
 		if (error)
 			do_error(
@@ -203,7 +202,7 @@ get_bno_rec(
 	struct xfs_btree_cur	*cur,
 	struct extent_tree_node	*prev_value)
 {
-	xfs_agnumber_t		agno = cur->bc_ag.pag->pag_agno;
+	xfs_agnumber_t		agno = cur->bc_group->xg_gno;
 
 	if (xfs_btree_is_bno(cur->bc_ops)) {
 		if (!prev_value)
@@ -254,7 +253,7 @@ init_freespace_cursors(
 	struct bt_rebuild	*btr_bno,
 	struct bt_rebuild	*btr_cnt)
 {
-	xfs_agnumber_t		agno = pag->pag_agno;
+	xfs_agnumber_t		agno = pag_agno(pag);
 	unsigned int		agfl_goal;
 	int			error;
 
@@ -377,7 +376,7 @@ get_ino_rec(
 	struct xfs_btree_cur	*cur,
 	struct ino_tree_node	*prev_value)
 {
-	xfs_agnumber_t		agno = cur->bc_ag.pag->pag_agno;
+	xfs_agnumber_t		agno = cur->bc_group->xg_gno;
 
 	if (xfs_btree_is_ino(cur->bc_ops)) {
 		if (!prev_value)
@@ -482,7 +481,7 @@ init_ino_cursors(
 	struct bt_rebuild	*btr_fino)
 {
 	struct ino_tree_node	*ino_rec;
-	xfs_agnumber_t		agno = pag->pag_agno;
+	xfs_agnumber_t		agno = pag_agno(pag);
 	unsigned int		ino_recs = 0;
 	unsigned int		fino_recs = 0;
 	bool			finobt;
@@ -615,7 +614,7 @@ get_rmapbt_records(
 		if (ret == 0)
 			do_error(
  _("ran out of records while rebuilding AG %u rmap btree\n"),
-					cur->bc_ag.pag->pag_agno);
+					cur->bc_group->xg_gno);
 
 		block_rec = libxfs_btree_rec_addr(cur, idx, block);
 		cur->bc_ops->init_rec_from_cur(cur, block_rec);
@@ -632,7 +631,7 @@ init_rmapbt_cursor(
 	unsigned int		est_agfreeblocks,
 	struct bt_rebuild	*btr)
 {
-	xfs_agnumber_t		agno = pag->pag_agno;
+	xfs_agnumber_t		agno = pag_agno(pag);
 	int			error;
 
 	if (!xfs_has_rmapbt(sc->mp))
@@ -647,7 +646,7 @@ init_rmapbt_cursor(
 
 	/* Compute how many blocks we'll need. */
 	error = -libxfs_btree_bload_compute_geometry(btr->cur, &btr->bload,
-			rmap_record_count(sc->mp, agno));
+			rmap_record_count(sc->mp, false, agno));
 	if (error)
 		do_error(
 _("Unable to compute rmap btree geometry, error %d.\n"), error);
@@ -664,7 +663,8 @@ build_rmap_tree(
 {
 	int			error;
 
-	error = rmap_init_mem_cursor(sc->mp, NULL, agno, &btr->rmapbt_cursor);
+	error = rmap_init_mem_cursor(sc->mp, NULL, false, agno,
+			&btr->rmapbt_cursor);
 	if (error)
 		do_error(
 _("Insufficient memory to construct rmap cursor.\n"));
@@ -715,7 +715,7 @@ init_refc_cursor(
 	unsigned int		est_agfreeblocks,
 	struct bt_rebuild	*btr)
 {
-	xfs_agnumber_t		agno = pag->pag_agno;
+	xfs_agnumber_t		agno = pag_agno(pag);
 	int			error;
 
 	if (!xfs_has_reflink(sc->mp))
@@ -730,7 +730,7 @@ init_refc_cursor(
 
 	/* Compute how many blocks we'll need. */
 	error = -libxfs_btree_bload_compute_geometry(btr->cur, &btr->bload,
-			refcount_record_count(sc->mp, agno));
+			refcount_record_count(sc->mp, false, agno));
 	if (error)
 		do_error(
 _("Unable to compute refcount btree geometry, error %d.\n"), error);
@@ -747,7 +747,7 @@ build_refcount_tree(
 {
 	int			error;
 
-	error = init_refcount_cursor(agno, &btr->slab_cursor);
+	error = init_refcount_cursor(false, agno, &btr->slab_cursor);
 	if (error)
 		do_error(
 _("Insufficient memory to construct refcount cursor.\n"));
@@ -769,7 +769,7 @@ estimate_allocbt_blocks(
 	unsigned int		nr_extents)
 {
 	/* Account for space consumed by both free space btrees */
-	return libxfs_allocbt_calc_size(pag->pag_mount, nr_extents) * 2;
+	return libxfs_allocbt_calc_size(pag_mount(pag), nr_extents) * 2;
 }
 
 static xfs_extlen_t
@@ -777,7 +777,7 @@ estimate_inobt_blocks(
 	struct xfs_perag	*pag)
 {
 	struct ino_tree_node	*ino_rec;
-	xfs_agnumber_t		agno = pag->pag_agno;
+	xfs_agnumber_t		agno = pag_agno(pag);
 	unsigned int		ino_recs = 0;
 	unsigned int		fino_recs = 0;
 	xfs_extlen_t		ret;
@@ -807,9 +807,9 @@ estimate_inobt_blocks(
 			fino_recs++;
 	}
 
-	ret = libxfs_iallocbt_calc_size(pag->pag_mount, ino_recs);
-	if (xfs_has_finobt(pag->pag_mount))
-		ret += libxfs_iallocbt_calc_size(pag->pag_mount, fino_recs);
+	ret = libxfs_iallocbt_calc_size(pag_mount(pag), ino_recs);
+	if (xfs_has_finobt(pag_mount(pag)))
+		ret += libxfs_iallocbt_calc_size(pag_mount(pag), fino_recs);
 	return ret;
 
 }

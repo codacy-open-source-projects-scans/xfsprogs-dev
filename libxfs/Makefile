@@ -49,23 +49,30 @@ HFILES = \
 	xfs_dir2.h \
 	xfs_errortag.h \
 	xfs_exchmaps.h \
+	xfs_group.h \
 	xfs_ialloc.h \
 	xfs_ialloc_btree.h \
 	xfs_inode_buf.h \
 	xfs_inode_fork.h \
 	xfs_inode_util.h \
+	xfs_metadir.h \
+	xfs_metafile.h \
 	xfs_parent.h \
 	xfs_quota_defs.h \
 	xfs_refcount.h \
 	xfs_refcount_btree.h \
+	xfs_rtrefcount_btree.h \
 	xfs_rmap.h \
 	xfs_rmap_btree.h \
 	xfs_rtbitmap.h \
+	xfs_rtgroup.h \
+	xfs_rtrmap_btree.h \
 	xfs_sb.h \
 	xfs_shared.h \
 	xfs_trans_resv.h \
 	xfs_trans_space.h \
-	xfs_dir2_priv.h
+	xfs_dir2_priv.h \
+	xfs_zones.h
 
 CFILES = buf_mem.c \
 	cache.c \
@@ -105,25 +112,44 @@ CFILES = buf_mem.c \
 	xfs_dir2_sf.c \
 	xfs_dquot_buf.c \
 	xfs_exchmaps.c \
+	xfs_group.c \
 	xfs_ialloc.c \
 	xfs_iext_tree.c \
 	xfs_inode_buf.c \
 	xfs_inode_fork.c \
 	xfs_inode_util.c \
 	xfs_ialloc_btree.c \
+	xfs_metadir.c \
+	xfs_metafile.c \
 	xfs_log_rlimit.c \
 	xfs_parent.c \
 	xfs_refcount.c \
 	xfs_refcount_btree.c \
+	xfs_rtrefcount_btree.c \
 	xfs_rmap.c \
 	xfs_rmap_btree.c \
 	xfs_rtbitmap.c \
+	xfs_rtgroup.c \
+	xfs_rtrmap_btree.c \
 	xfs_sb.c \
 	xfs_symlink_remote.c \
 	xfs_trans_inode.c \
 	xfs_trans_resv.c \
 	xfs_trans_space.c \
-	xfs_types.c
+	xfs_types.c \
+	xfs_zones.c
+
+EXTRA_CFILES=\
+	ioctl_c_dummy.c
+
+EXTRA_CXXFILES=\
+	ioctl_cxx_dummy.cpp
+
+EXTRA_OBJECTS=\
+	$(patsubst %.c,%.o,$(EXTRA_CFILES)) \
+	$(patsubst %.cpp,%.o,$(EXTRA_CXXFILES))
+
+LDIRT += $(EXTRA_OBJECTS)
 
 #
 # Tracing flags:
@@ -148,7 +174,23 @@ LTLIBS = $(LIBPTHREAD) $(LIBRT)
 # don't try linking xfs_repair with a debug libxfs.
 DEBUG = -DNDEBUG
 
-default: ltdepend $(LTLIBRARY)
+default: ltdepend $(LTLIBRARY) $(EXTRA_OBJECTS)
+
+%dummy.o: %dummy.cpp
+	@echo "    [CXXD]   $@"
+	$(Q)$(CXX) $(CXXFLAGS) -c $<
+
+%dummy.o: %dummy.c
+	@echo "    [CCD]    $@"
+	$(Q)$(CC) $(CFLAGS) -c $<
+
+MAKECXXDEP := $(MAKEDEPEND) $(CXXFLAGS)
+
+.PHONY: .extradep
+
+.extradep: $(EXTRA_CFILES) $(EXTRA_CXXFILES) $(HFILES)
+	$(Q)$(MAKEDEP) $(EXTRA_CFILES) > .extradep
+	$(Q)$(MAKECXXDEP) $(EXTRA_CXXFILES) >> .extradep
 
 # set up include/xfs header directory
 include $(BUILDRULES)
@@ -172,4 +214,5 @@ install-dev: install
 # running the install-headers target.
 ifndef NODEP
 -include .ltdep
+-include .extradep
 endif

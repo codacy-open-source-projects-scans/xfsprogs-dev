@@ -59,13 +59,33 @@ static inline void *kmalloc(size_t size, gfp_t flags)
 }
 
 #define kzalloc(size, gfp)	kvmalloc((size), (gfp) | __GFP_ZERO)
+#define kvzalloc(size, gfp)	kzalloc((size), (gfp))
 
 static inline void kfree(const void *ptr)
 {
 	free((void *)ptr);
 }
 
+static inline void kvfree(const void *ptr)
+{
+	kfree(ptr);
+}
+
+static inline void kfree_rcu_mightsleep(const void *ptr)
+{
+	kfree(ptr);
+}
+
 __attribute__((format(printf,2,3)))
 char *kasprintf(gfp_t gfp, const char *fmt, ...);
+
+static inline void *kmemdup(const void *src, size_t len, gfp_t gfp)
+{
+	void *p = kmalloc(len, gfp);
+
+	if (p)
+		memcpy(p, src, len);
+	return p;
+}
 
 #endif

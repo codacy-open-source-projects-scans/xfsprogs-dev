@@ -64,6 +64,9 @@
 #define trace_xfs_attr_rmtval_alloc(...)	((void) 0)
 #define trace_xfs_attr_rmtval_remove_return(...) ((void) 0)
 
+#define trace_xfs_calc_max_atomic_write_fsblocks(...) ((void) 0)
+#define trace_xfs_calc_max_atomic_write_log_geometry(...) ((void) 0)
+
 #define trace_xfs_log_recover_item_add_cont(a,b,c,d)	((void) 0)
 #define trace_xfs_log_recover_item_add(a,b,c,d)	((void) 0)
 
@@ -79,14 +82,14 @@
 #define trace_xfs_btree_free_block(...)		((void) 0)
 #define trace_xfs_btree_alloc_block(...)	((void) 0)
 
-#define trace_xfs_free_extent(a,b,c,d,e,f,g)	((void) 0)
+#define trace_xfs_free_extent(...)		((void) 0)
 #define trace_xfs_agf(a,b,c,d)			((void) 0)
-#define trace_xfs_read_agf(a,b)			((void) 0)
-#define trace_xfs_alloc_read_agf(a,b)		((void) 0)
-#define trace_xfs_read_agi(a,b)			((void) 0)
-#define trace_xfs_ialloc_read_agi(a,b)		((void) 0)
-#define trace_xfs_irec_merge_pre(a,b,c,d,e,f)	((void) 0)
-#define trace_xfs_irec_merge_post(a,b,c,d)	((void) 0)
+#define trace_xfs_read_agf(...)			((void) 0)
+#define trace_xfs_alloc_read_agf(...)		((void) 0)
+#define trace_xfs_read_agi(...)			((void) 0)
+#define trace_xfs_ialloc_read_agi(...)		((void) 0)
+#define trace_xfs_irec_merge_pre(...)		((void) 0)
+#define trace_xfs_irec_merge_post(...)		((void) 0)
 
 #define trace_xfs_iext_insert(a,b,c,d)		((void) 0)
 #define trace_xfs_iext_remove(a,b,c,d)		((void) 0)
@@ -356,14 +359,45 @@
 #define trace_xfs_exchmaps_overhead(...)	((void) 0)
 #define trace_xfs_exchmaps_update_inode_size(...) ((void) 0)
 
+/* set c = c to avoid unused var warnings */
+#define trace_xfs_rtgroup_get(a,b)		((a) = (a))
+#define trace_xfs_rtgroup_hold(a,b)		((a) = (a))
+#define trace_xfs_rtgroup_put(a,b)		((a) = (a))
+#define trace_xfs_rtgroup_grab(a,b)		((a) = (a))
+#define trace_xfs_rtgroup_rele(a,b)		((a) = (a))
+
 #define trace_xfs_fs_mark_healthy(a,b)		((void) 0)
 
 #define trace_xlog_intent_recovery_failed(...)	((void) 0)
+
+#define trace_xfs_metadir_cancel(...)		((void) 0)
+#define trace_xfs_metadir_commit(...)		((void) 0)
+#define trace_xfs_metadir_create(...)		((void) 0)
+#define trace_xfs_metadir_link(...)		((void) 0)
+#define trace_xfs_metadir_lookup(...)		((void) 0)
+#define trace_xfs_metadir_start_create(...)	((void) 0)
+#define trace_xfs_metadir_start_link(...)	((void) 0)
+#define trace_xfs_metadir_teardown(...)		((void) 0)
+#define trace_xfs_metadir_try_create(...)	((void) 0)
 
 #define trace_xfs_iunlink_update_bucket(...)	((void) 0)
 #define trace_xfs_iunlink_update_dinode(...)	((void) 0)
 #define trace_xfs_iunlink(...)			((void) 0)
 #define trace_xfs_iunlink_reload_next(...)	((void) 0)
 #define trace_xfs_iunlink_remove(...)		((void) 0)
+
+#define trace_xfs_group_get(...)		((void) 0)
+#define trace_xfs_group_grab_next_tag(...)	((void) 0)
+#define trace_xfs_group_grab(...)		((void) 0)
+#define trace_xfs_group_hold(...)		((void) 0)
+#define trace_xfs_group_put(...)		((void) 0)
+#define trace_xfs_group_rele(...)		((void) 0)
+
+#define trace_xfs_metafile_resv_alloc_space(...)	((void) 0)
+#define trace_xfs_metafile_resv_critical(...)	((void) 0)
+#define trace_xfs_metafile_resv_free(...)		((void) 0)
+#define trace_xfs_metafile_resv_free_space(...)	((void) 0)
+#define trace_xfs_metafile_resv_init(...)		((void) 0)
+#define trace_xfs_metafile_resv_init_error(...)	((void) 0)
 
 #endif /* __TRACE_H__ */

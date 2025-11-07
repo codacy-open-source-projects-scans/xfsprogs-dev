@@ -143,7 +143,7 @@ libxfs_iget(
 	int			error = 0;
 
 	/* reject inode numbers outside existing AGs */
-	if (!ino || XFS_INO_TO_AGNO(mp, ino) >= mp->m_sb.sb_agcount)
+	if (!xfs_verify_ino(mp, ino))
 		return -EINVAL;
 
 	ip = kmem_cache_zalloc(xfs_inode_cache, 0);
@@ -202,6 +202,66 @@ libxfs_iget(
 out_destroy:
 	kmem_cache_free(xfs_inode_cache, ip);
 	*ipp = NULL;
+	return error;
+}
+
+/*
+ * Get a metadata inode.
+ *
+ * The metafile type must match the file mode exactly, and for files in the
+ * metadata directory tree, it must match the inode's metatype exactly.
+ */
+int
+libxfs_trans_metafile_iget(
+	struct xfs_trans	*tp,
+	xfs_ino_t		ino,
+	enum xfs_metafile_type	metafile_type,
+	struct xfs_inode	**ipp)
+{
+	struct xfs_mount	*mp = tp->t_mountp;
+	struct xfs_inode	*ip;
+	umode_t			mode;
+	int			error;
+
+	error = libxfs_iget(mp, tp, ino, 0, &ip);
+	if (error)
+		return error;
+
+	if (metafile_type == XFS_METAFILE_DIR)
+		mode = S_IFDIR;
+	else
+		mode = S_IFREG;
+	if (inode_wrong_type(VFS_I(ip), mode))
+		goto bad_rele;
+	if (xfs_has_metadir(mp)) {
+		if (!xfs_is_metadir_inode(ip))
+			goto bad_rele;
+		if (metafile_type != ip->i_metatype)
+			goto bad_rele;
+	}
+
+	*ipp = ip;
+	return 0;
+bad_rele:
+	libxfs_irele(ip);
+	return -EFSCORRUPTED;
+}
+
+/* Grab a metadata file if the caller doesn't already have a transaction. */
+int
+libxfs_metafile_iget(
+	struct xfs_mount	*mp,
+	xfs_ino_t		ino,
+	enum xfs_metafile_type	metafile_type,
+	struct xfs_inode	**ipp)
+{
+	struct xfs_trans	*tp;
+	int			error;
+
+	tp = libxfs_trans_alloc_empty(mp);
+
+	error = libxfs_trans_metafile_iget(tp, ino, metafile_type, ipp);
+	libxfs_trans_cancel(tp);
 	return error;
 }
 

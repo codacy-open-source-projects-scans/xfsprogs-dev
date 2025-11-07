@@ -28,7 +28,7 @@ mkfs.xfs \- construct an XFS filesystem
 .I naming_options
 ] [
 .B \-p
-.I protofile_options
+.I prototype_options
 ] [
 .B \-q
 ] [
@@ -272,6 +272,17 @@ When the option
 .B \-m finobt=0
 is used, the inode btree counter feature is not supported and is disabled.
 .TP
+.BI metadir= value
+This option creates an internal directory tree to store filesystem metadata.
+.IP
+By default,
+.B mkfs.xfs
+will not enable this feature.
+If the option
+.B \-m crc=0
+is used, the metadata directory feature is not supported and is disabled.
+
+.TP
 .BI uuid= value
 Use the given value as the filesystem UUID for the newly created filesystem.
 The default is to generate a random UUID.
@@ -329,6 +340,54 @@ Set the autofsck filesystem property to this value.
 See the
 .BI xfs_scrub (8)
 manual page for more information on this property.
+.TP
+.B uquota
+If the metadata directory feature is enabled, the
+.B \-m uquota
+option will set up user quota accounting and enforcement at format time;
+specifying the quota options in fstab is no longer unnecessary.
+If metadata directories are not enabled, quotas must still be enabled via
+fstab.
+.TP
+.B gquota
+If the metadata directory feature is enabled, the
+.B \-m gquota
+option will set up group quota accounting and enforcement at format time;
+specifying the quota options in fstab is no longer unnecessary.
+If metadata directories are not enabled, quotas must still be enabled via
+fstab.
+.TP
+.B pquota
+If the metadata directory feature is enabled, the
+.B \-m pquota
+option will set up project quota accounting and enforcement at format time;
+specifying the quota options in fstab is no longer unnecessary.
+If metadata directories are not enabled, quotas must still be enabled via
+fstab.
+.TP
+.B uqnoenforce
+If the metadata directory feature is enabled, the
+.B \-m uqnoenforce
+option will set up user quota accounting at format time; specifying the quota
+options in fstab is no longer unnecessary.
+If metadata directories are not enabled, quotas must still be enabled via
+fstab.
+.TP
+.B gqnoenforce
+If the metadata directory feature is enabled, the
+.B \-m gqnoenforce
+option will set up group quota accounting at format time; specifying the quota
+options in fstab is no longer unnecessary.
+If metadata directories are not enabled, quotas must still be enabled via
+fstab.
+.TP
+.B pqnoenforce
+If the metadata directory feature is enabled, the
+.B \-m pqnoenforce
+option will set up project quota accounting at format time; specifying the
+quota options in fstab is no longer unnecessary.
+If metadata directories are not enabled, quotas must still be enabled via
+fstab.
 .RE
 .PP
 .PD 0
@@ -683,6 +742,13 @@ Online repair uses this functionality to rebuild extended attributes,
 directories, symbolic links, and realtime metadata files.
 This feature is disabled by default.
 This feature is only available for filesystems formatted with -m crc=1.
+.TP
+.BI max_atomic_write[= value]
+When enabled, application programs can use the RWF_ATOMIC write flag to
+persist changes of up to this size without tearing.
+The default is chosen to allow a reasonable amount of scalability.
+This value must also be passed via mount option.
+This feature is only available for filesystems formatted with reflink.
 .RE
 .PP
 .PD 0
@@ -902,34 +968,56 @@ When CRCs are enabled (the default), the ftype functionality is always
 enabled, and cannot be turned off.
 .IP
 In other words, this option is only tunable on the deprecated V4 format.
+.TP
+.BI parent= value
+This feature creates back references from child files to parent directories
+so that online repair can reconstruct broken directory files.
+The value is either 0 to disable the feature, or 1 to create parent pointers.
+
+By default,
+.B mkfs.xfs
+will not create parent pointers.
+This feature is only available for filesystems created with the (default)
+.B \-m crc=1
+option set.
 .RE
 .PP
 .PD 0
 .TP
-.BI \-p " protofile_options"
+.BI \-p " prototype_options"
 .TP
 .BI "Section Name: " [proto]
 .PD
-These options specify the protofile parameters for populating the filesystem.
+These options specify the prototype parameters for populating the filesystem.
 The valid
-.I protofile_options
+.I prototype_options
 are:
 .RS 1.2i
 .TP
-.BI [file=] protofile
+.BI [file=]
 The
 .B file=
 prefix is not required for this CLI argument for legacy reasons.
 If specified as a config file directive, the prefix is required.
-
+.TP
+.BI [file=] directory
 If the optional
 .PD
-.I protofile
-argument is given,
+.I prototype
+argument is given, and it's a directory,
 .B mkfs.xfs
-uses
-.I protofile
-as a prototype file and takes its directions from that file.
+will populate the root file system with the contents of the given directory
+tree.
+Content, timestamps (atime, mtime), attributes and extended attributes
+are preserved for all file types.
+.TP
+.BI [file=] protofile
+If the optional
+.PD
+.I prototype
+argument is given, and points to a regular file,
+.B mkfs.xfs
+uses it as a prototype file and takes its directions from that file.
 The blocks and inodes specifiers in the
 .I protofile
 are provided for backwards compatibility, but are otherwise unused.
@@ -1065,8 +1153,12 @@ always terminated with the dollar (
 .B $
 ) token.
 .TP
+.BI atime= value
+If set to 1,  mkfs will copy in access timestamps from the source files.
+Otherwise, access timestamps will be set to the current time.
+.TP
 .BI slashes_are_spaces= value
-If set to 1, slashes ("/") in the first token of each line of the protofile
+If set to 1, slashes ("/") in the first token of each line of the prototype file
 are converted to spaces.
 This enables the creation of a filesystem containing filenames with spaces.
 By default, this is set to 0.
@@ -1118,6 +1210,82 @@ or logical volume containing the section.
 .BI noalign
 This option disables stripe size detection, enforcing a realtime device with no
 stripe geometry.
+.TP
+.BI rgcount= value
+This is used to specify the number of allocation groups in the realtime
+section.
+The realtime section of the filesystem can be divided into allocation groups to
+improve the performance of XFS.
+More allocation groups imply that more parallelism can be achieved when
+allocating blocks.
+The minimum allocation group size is 2 realtime extents; the maximum size is
+2^31 blocks.
+The rt section of the filesystem is divided into
+.I value
+allocation groups (default value is scaled automatically based
+on the underlying device size).
+.TP
+.BI rgsize= value
+This is an alternative to using the
+.B rgcount
+suboption. The
+.I value
+is the desired size of the realtime allocation group expressed in bytes
+(usually using the
+.BR m " or " g
+suffixes).
+This value must be a multiple of the realtime extent size,
+must be at least two realtime extents, and no more than 2^31 blocks.
+The
+.B rgcount
+and
+.B rgsize
+suboptions are mutually exclusive.
+.TP
+.BI concurrency= value
+Create enough realtime allocation groups to handle the desired level of
+concurrency.
+The goal of this calculation scheme is to set the number of rtgroups to an
+integer multiple of the number of writer threads desired, to minimize
+contention of rtgroup locks.
+This scheme will neither create fewer rtgroups than would be created by the
+default configuration, nor will it create rtgroups smaller than 4GB.
+This option is not compatible with the
+.B rgcount
+or
+.B rgsize
+options.
+The magic value
+.I nr_cpus
+or
+.I 1
+or no value at all will set this parameter to the number of active processors
+in the system.
+If the kernel advertises that the realtime device is a non-mechanical storage
+device,
+.B mkfs.xfs
+will use this new geometry calculation scheme.
+The magic value of
+.I 0
+forces use of the older rtgroups geometry calculations that is used for
+mechanical storage.
+.TP
+.BI zoned= value
+Controls if the zoned allocator is used for the realtime device.
+The value is either 0 to disable the feature, or 1 to enable it.
+Defaults to 1 for zoned block device, else 0.
+.TP
+.BI start= value
+Controls the start of the internal realtime section.  Defaults to 0
+for conventional block devices, or the start of the first sequential
+required zone for zoned block devices.
+This option is only valid if the zoned realtime allocator is used.
+.TP
+.BI reserved= value
+Controls the amount of space in the realtime section that is reserved for
+internal use by garbage collection and reorganization algorithms.
+Defaults to 0 if not set.
+This option is only valid if the zoned realtime allocator is used.
 .RE
 .PP
 .PD 0

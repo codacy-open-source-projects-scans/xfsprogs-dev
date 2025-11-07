@@ -14,6 +14,9 @@ xfs_db \- debug an XFS filesystem
 .B \-l
 .I logdev
 ] [
+.B \-R
+.I rtdev
+] [
 .B \-p
 .I progname
 ]
@@ -79,6 +82,16 @@ Set the program name to
 .I progname
 for prompts and some error messages, the default value is
 .BR xfs_db .
+.TP
+.B -R
+.I rtdev
+Specifies the device where the realtime data resides.
+This is only relevant for filesystems that have a realtime section.
+See the
+.BR mkfs.xfs "(8) " \-r
+option, and refer to
+.BR xfs (5)
+for a detailed description of the XFS realtime section.
 .TP
 .B -r
 Open
@@ -332,7 +345,7 @@ command. This must be done before another
 command can be given, presumably with different arguments than the previous one.
 .TP
 .BI "blockget [\-npvs] [\-b " bno "] ... [\-i " ino "] ..."
-Get block usage and check filesystem consistency.
+Get block usage.
 The information is saved for use by a subsequent
 .BR blockuse ", " ncheck ", or " blocktrash
 command.
@@ -506,7 +519,7 @@ If the cursor points at an inode, dump the extended attribute block mapping btre
 Dump all keys and pointers in intermediate btree nodes, and all records in leaf btree nodes.
 .RE
 .TP
-.BI "btheight [\-b " blksz "] [\-n " recs "] [\-w " max "|" min "|" absmax "] btree types..."
+.BI "btheight [\-b " blksz "] [\-n " recs "] [\-w " max "|" min "|" absmax "|" avg "] btree types..."
 For a given number of btree records and a btree type, report the number of
 records and blocks for each level of the btree, and the total number of blocks.
 The btree type must be given after the options.
@@ -522,8 +535,10 @@ The supported btree types are:
 .IR finobt ,
 .IR bmapbt ,
 .IR refcountbt ,
+.IR rmapbt ,
+.IR rtrefcountbt ,
 and
-.IR rmapbt .
+.IR rtrmapbt .
 The magic value
 .I all
 can be used to walk through all btree types.
@@ -549,12 +564,11 @@ maximally loaded.
 .B \-w min
 shows only the worst case scenario, which is when the btree blocks are
 half full.
-.RE
 .TP
-.B check
-See the
-.B blockget
-command.
+.B \-w avg
+shows only the average case scenario, which is when the btree blocks are
+three quarters full.
+.RE
 .TP
 .BI "convert " "type number" " [" "type number" "] ... " type
 Convert from one address form to another.
@@ -658,7 +672,7 @@ Recalculate the current structure's correct CRC value, and write it to disk.
 Validate and display the current value and state of the structure's CRC.
 .RE
 .TP
-.BI "daddr [" d ]
+.BI "daddr [" -r "] [" d ]
 Set current address to the daddr (512 byte block) given by
 .IR d .
 If no value for
@@ -667,6 +681,13 @@ is given, the current address is printed, expressed as a daddr.
 The type is set to
 .B data
 (uninterpreted).
+
+If an address and the
+.B \-l
+option are specified, the current address is set to the external log device.
+If an address and the
+.B \-r
+option are specified, the current address is set to the realtime device.
 .TP
 .BI dblock " filoff"
 Set current address to the offset
@@ -972,7 +993,7 @@ will result in truncation and a warning will be issued. If no
 .I label
 is given, the current filesystem label is printed.
 .TP
-.BI "link [-i " ino "] [-p " path "] [-t " ftype "] name"
+.BI "link [-i " ino "] [-m] [-p " path "] [-t " ftype "] name"
 In the current directory, create a directory entry with the given
 .I name
 pointing to a file.
@@ -985,12 +1006,30 @@ The file type in the directory entry will be determined from the mode of the
 child file unless the
 .I ftype
 option is given.
+The
+.B -m
+option specifies that the path lookup should be done in the metadata directory
+tree.
 The file being targetted must not be on the iunlink list.
 .TP
 .BI "log [stop | start " filename ]
 Start logging output to
 .IR filename ,
 stop logging, or print the current logging status.
+.TP
+.BI "logblock [" logbno ]
+Set current address to the log block value given by
+.IR logbno .
+If no value for
+.I logbno
+is given the current address is printed, expressed as an fsb.
+The type is set to
+.B data
+(uninterpreted).
+If the filesystem has an external log, then the address will be within the log
+device.
+If the filesystem has an internal log, then the address will be within the
+internal log.
 .TP
 .BI "logformat [\-c " cycle "] [\-s " sunit "]"
 Reformats the log to the specified log cycle and log stripe unit.
@@ -1005,7 +1044,7 @@ This makes it easier to find discrepancies in the reservation calculations
 between xfsprogs and the kernel, which will help when diagnosing minimum
 log size calculation errors.
 .TP
-.BI "ls [\-i] [" paths "]..."
+.BI "ls [\-im] [" paths "]..."
 List the contents of a directory.
 If a path resolves to a directory, the directory will be listed.
 If no paths are supplied and the IO cursor points at a directory inode,
@@ -1019,6 +1058,9 @@ directory cookie, inode number, file type, hash, name length, name.
 Resolve each of the given paths to an inode number and print that number.
 If no paths are given and the IO cursor points to an inode, print the inode
 number.
+.TP
+.B \-m
+Absolute paths should be walked from the root of the metadata directory tree.
 .RE
 .TP
 .BI "metadump [\-egow] " filename
@@ -1046,18 +1088,26 @@ See the
 .B print
 command.
 .TP
-.BI "parent [" paths "]..."
+.BI "parent [\-m] [" paths "]..."
 List the parents of a file.
 If a path resolves to a file, the parents of that file will be listed.
 If no paths are supplied and the IO cursor points at an inode, the parents of
 that file will be listed.
+The
+.B \-m
+option causes absolute paths to be walked from the root of the metadata
+directory tree.
 
 The output format is:
 inode number, inode generation, ondisk namehash, namehash, name length, name.
 .TP
-.BI "path " dir_path
+.BI "path [\-m] " dir_path
 Walk the directory tree to an inode using the supplied path.
 Absolute and relative paths are supported.
+The
+.B \-m
+option causes absolute paths to be walked from the root of the metadata
+directory tree.
 .TP
 .B pop
 Pop location from the stack.
@@ -1082,11 +1132,184 @@ command.
 Exit
 .BR xfs_db .
 .TP
+.BI "rdump [-s] [" "paths..." "] " "destination_dir"
+Recover the files given by the
+.B path
+arguments by copying them of the filesystem into the directory specified in
+.BR destination_dir .
+
+If the
+.B -s
+option is specified, errors are fatal.
+By default, read errors are ignored in favor of recovering as much data from
+the filesystem as possible.
+
+If zero
+.B paths
+are specified, the entire filesystem is dumped.
+If only one
+.B path
+is specified and it is a directory, the children of that directory will be
+copied directly to the destination.
+If multiple
+.B paths
+are specified, each file is copied into the directory as a new child.
+
+If possible, sparse holes, xfs file attributes, and extended attributes will be
+preserved.
+.TP
+.BI "rgresv [" rgno ]
+Displays the per-rtgroup reservation size, and per-rtgroup
+reservation usage for a given realtime allocation group.
+If no argument is given, display information for all rtgroups.
+.TP
+.BI "rtblock [" rtbno ]
+Set current address to the location on the realtime device given by
+.IR rtbno .
+This value must be a realtime block number.
+If no value for
+.I rtbno
+is given the current address is printed, expressed as an rtbno.
+The type is set to
+.B data
+(uninterpreted).
+.TP
+.BI "rtextent [" rtxno ]
+Set current address to the location on the realtime device given by
+.IR rtextent .
+This value must be a linear address in units of realtime extents.
+If no value for
+.I rtextent
+is given the current address is printed, expressed as an rtextent.
+The type is set to
+.B data
+(uninterpreted).
+.TP
 .BI "ring [" index ]
 Show position ring (if no
 .I index
 argument is given), or move to a specific entry in the position ring given by
 .IR index .
+.TP
+.BI "rtconvert " "type number" " [" "type number" "] ... " type
+Convert from one address form to another for realtime section addresses.
+The known
+.IR type s,
+with alternate names, are:
+.RS 1.0i
+.PD 0
+.HP
+.B rgblock
+or
+.B rgbno
+(realtime block within a realtime group)
+.HP
+.B rgnumber
+or
+.B rgno
+(realtime group number)
+.HP
+.B bboff
+or
+.B daddroff
+(byte offset in a
+.BR daddr )
+.HP
+.B blkoff
+or
+.B fsboff or
+.B rtboff
+(byte offset in a
+.B rtblock
+or
+.BR rtextent )
+.HP
+.B byte
+or
+.B fsbyte
+(byte address in filesystem)
+.HP
+.B daddr
+or
+.B bb
+(disk address, 512-byte blocks)
+.HP
+.B rtblock
+or
+.B rtb
+or
+.B rtbno
+(realtime filesystem block, see the
+.B fsblock
+command)
+.HP
+.B rtx
+or
+.B rtextent
+(realtime extent)
+.HP
+.B rbmblock
+or
+.B rbmb
+(realtime bitmap block)
+.HP
+.B rbmword
+or
+.B rbmw
+(32-bit word within a realtime bitmap block)
+.HP
+.B rsumblock
+or
+.B rsmb
+(realtime summary file block)
+.HP
+.B rsuminfo
+or
+.B rsmi
+(32-bit counter within a realtime summary block)
+.HP
+.B rsumlog
+or
+.B rsml
+(log2len parameter used for summary file offset computations)
+.PD
+.RE
+.IP
+Only conversions that "make sense" are allowed.
+The compound form (with more than three arguments) is useful for
+conversions such as
+.B convert rgno
+.I rg
+.B rgbno
+.I rgb
+.BR rtblock .
+
+Realtime summary file location conversions have the following rules:
+Each info word in the rt summary file counts the number of free extents of a
+given log2(length) that start in a given rt bitmap block.
+
+To compute summary file location information for a given rt bitmap block, a
+log2(extent length) must be specified as the last type/number pair before the
+conversion type, and the type must be
+.BR rsumlog .
+
+For example, these commands tell us where to look in the rt summary file for
+the number of free rtextents of length 2^21 starting in rt bitmap block 30:
+
+.B rtconvert rbmblock 30 rsumlog 21 rsumblock
+
+.B rtconvert rbmblock 30 rsumlog 21 rsuminfo
+
+To compute the rt bitmap block from summary file location, the type/number
+pairs must be specified exactly in the order
+.BR rsumlog ", " rsuminfo ", " rsumblock .
+
+For example, this command tells us which block in the rt bitmap file is
+summarized by info word 809 in rt summary block 10 assuming that the
+maximum free extent length is 2^21 rtextents:
+
+.B rtconvert rsumlog 21 rsuminfo 809 rsumblock 10 rbmblock
+
 .TP
 .BI "sb [" agno ]
 Set current address to SB header in allocation group
@@ -1112,7 +1335,7 @@ The possible data types are:
 .BR agf ", " agfl ", " agi ", " attr ", " bmapbta ", " bmapbtd ,
 .BR bnobt ", " cntbt ", " data ", " dir ", " dir2 ", " dqblk ,
 .BR inobt ", " inode ", " log ", " refcntbt ", " rmapbt ", " rtbitmap ,
-.BR rtsummary ", " sb ", " symlink " and " text .
+.BR rtsummary ", " sb ", " symlink ", " rtrmapbt ", " rtrefcbt ", and " text .
 See the TYPES section below for more information on these data types.
 .TP
 .BI "timelimit [" OPTIONS ]
@@ -1142,6 +1365,16 @@ raw seconds since the Unix epoch.
 In the current directory, remove a directory entry with the given
 .IR name .
 The file being targetted will not be put on the iunlink list.
+.TP
+.BI "untorn_write_max [\-b " blockcount "|\-l " logres "]"
+If
+.B -l
+is specified, compute the maximum (in fsblocks) untorn write that we can
+emulate with copy on write given a log reservation size (in bytes).
+If
+.B -b
+is specified, compute the log reservation size that would be needed to
+emulate an untorn write of the given number of fsblocks.
 .TP
 .BI "uuid [" uuid " | " generate " | " rewrite " | " restore ]
 Set the filesystem universally unique identifier (UUID).
@@ -2206,6 +2439,52 @@ block number within the allocation group to the next level in the Btree.
 .PD
 .RE
 .TP
+.B rtrefcbt
+There is one reference count Btree for the entire realtime device.  The
+.BR startblock " and "
+.B blockcount
+fields are 32 bits wide and record block counts within a realtime group.
+The root of this Btree is the realtime refcount inode, which is recorded in the
+metadata directory.
+Blocks are linked to sibling left and right blocks at each level, as well as by
+pointers from parent to child blocks.
+Each block has the following fields:
+.RS 1.4i
+.PD 0
+.TP 1.2i
+.B magic
+RTREFC block magic number, 0x52434e54 ('RCNT').
+.TP
+.B level
+level number of this block, 0 is a leaf.
+.TP
+.B numrecs
+number of data entries in the block.
+.TP
+.B leftsib
+left (logically lower) sibling block, 0 if none.
+.TP
+.B rightsib
+right (logically higher) sibling block, 0 if none.
+.TP
+.B recs
+[leaf blocks only] array of reference count records. Each record contains
+.BR startblock ,
+.BR blockcount ,
+and
+.BR refcount .
+.TP
+.B keys
+[non-leaf blocks only] array of key records. These are the first value
+of each block in the level below this one. Each record contains
+.BR startblock .
+.TP
+.B ptrs
+[non-leaf blocks only] array of child block pointers. Each pointer is a
+block number within the allocation group to the next level in the Btree.
+.PD
+.RE
+.TP
 .B rmapbt
 There is one set of filesystem blocks forming the reverse mapping Btree for
 each allocation group. The root block of this Btree is designated by the
@@ -2218,6 +2497,64 @@ blocks.  Each block has the following fields:
 .TP 1.2i
 .B magic
 RMAP block magic number, 0x524d4233 ('RMB3').
+.TP
+.B level
+level number of this block, 0 is a leaf.
+.TP
+.B numrecs
+number of data entries in the block.
+.TP
+.B leftsib
+left (logically lower) sibling block, 0 if none.
+.TP
+.B rightsib
+right (logically higher) sibling block, 0 if none.
+.TP
+.B recs
+[leaf blocks only] array of reference count records. Each record contains
+.BR startblock ,
+.BR blockcount ,
+.BR owner ,
+.BR offset ,
+.BR attr_fork ,
+.BR bmbt_block ,
+and
+.BR unwritten .
+.TP
+.B keys
+[non-leaf blocks only] array of double-key records. The first ("low") key
+contains the first value of each block in the level below this one. The second
+("high") key contains the largest key that can be used to identify any record
+in the subtree. Each record contains
+.BR startblock ,
+.BR owner ,
+.BR offset ,
+.BR attr_fork ,
+and
+.BR bmbt_block .
+.TP
+.B ptrs
+[non-leaf blocks only] array of child block pointers. Each pointer is a
+block number within the allocation group to the next level in the Btree.
+.PD
+.RE
+.TP
+.B rtrmapbt
+There is one reverse mapping Btree for each realtime group.
+The
+.BR startblock " and "
+.B blockcount
+fields are 32 bits wide and record blocks within a realtime group.
+The root of this Btree is the reverse-mapping inode, which is recorded in the
+metadata directory.
+Blocks are linked to sibling left and right blocks at each level, as well as by
+pointers from parent to child blocks.
+Each block has the following fields:
+.RS 1.4i
+.PD 0
+.TP 1.2i
+.B magic
+RTRMAP block magic number, 0x4d415052 ('MAPR').
 .TP
 .B level
 level number of this block, 0 is a leaf.
@@ -2474,8 +2811,7 @@ The block data is displayed in two columns: Hexadecimal format
 and printable ASCII chars.
 .SH DIAGNOSTICS
 Many messages can come from the
-.B check
-.RB ( blockget )
+.B blockget
 command.
 If the filesystem is completely corrupt, a core dump might
 be produced instead of the message
@@ -2485,7 +2821,7 @@ be produced instead of the message
 .RE
 .PP
 If the filesystem is very large (has many files) then
-.B check
+.B blockget
 might run out of memory. In this case the message
 .RS
 .B out of memory

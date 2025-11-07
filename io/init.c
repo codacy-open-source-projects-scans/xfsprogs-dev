@@ -44,10 +44,12 @@ init_cvtnum(
 static void
 init_commands(void)
 {
+	aginfo_init();
 	attr_init();
 	bmap_init();
 	bulkstat_init();
 	copy_range_init();
+	cachestat_init();
 	cowextsize_init();
 	encrypt_init();
 	fadvise_init();

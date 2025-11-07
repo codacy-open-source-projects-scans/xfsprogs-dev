@@ -7,10 +7,12 @@
 #ifndef __LIBXFS_H__
 #define __LIBXFS_H__
 
+/* CONFIG_XFS_* must be defined to 1 to work with IS_ENABLED() */
+
 /* For userspace XFS_RT is always defined */
-#define CONFIG_XFS_RT
+#define CONFIG_XFS_RT 1
 /* Ditto in-memory btrees */
-#define CONFIG_XFS_BTREE_IN_MEM
+#define CONFIG_XFS_BTREE_IN_MEM 1
 
 #include "libxfs_api_defs.h"
 #include "platform_defs.h"
@@ -84,6 +86,7 @@ struct iomap;
 #include "xfs_rmap_btree.h"
 #include "xfs_rmap.h"
 #include "xfs_refcount_btree.h"
+#include "xfs_rtrefcount_btree.h"
 #include "xfs_refcount.h"
 #include "xfs_btree_staging.h"
 #include "xfs_rtbitmap.h"
@@ -93,6 +96,13 @@ struct iomap;
 #include "xfs_btree_mem.h"
 #include "xfs_parent.h"
 #include "xfs_ag_resv.h"
+#include "xfs_metafile.h"
+#include "xfs_metadir.h"
+#include "xfs_rtgroup.h"
+#include "xfs_rtbitmap.h"
+#include "xfs_rtrmap_btree.h"
+#include "xfs_ag_resv.h"
+#include "defer_item.h"
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
@@ -172,8 +182,10 @@ extern int	libxfs_log_header(char *, uuid_t *, int, int, int, xfs_lsn_t,
 
 /* Shared utility routines */
 
-extern int	libxfs_alloc_file_space (struct xfs_inode *, xfs_off_t,
-				xfs_off_t, int, int);
+int	libxfs_alloc_file_space(struct xfs_inode *ip, xfs_off_t offset,
+		xfs_off_t len, uint32_t bmapi_flags);
+int	libxfs_file_write(struct xfs_inode *ip, void *buf, off_t pos,
+		size_t len);
 
 /* XXX: this is messy and needs fixing */
 #ifndef __LIBXFS_INTERNAL_XFS_H__
@@ -280,6 +292,12 @@ static inline bool xfs_sb_version_hassparseinodes(struct xfs_sb *sbp)
 {
 	return XFS_SB_VERSION_NUM(sbp) == XFS_SB_VERSION_5 &&
 		xfs_sb_has_incompat_feature(sbp, XFS_SB_FEAT_INCOMPAT_SPINODES);
+}
+
+static inline bool xfs_sb_version_haszoned(struct xfs_sb *sbp)
+{
+	return XFS_SB_VERSION_NUM(sbp) == XFS_SB_VERSION_5 &&
+		xfs_sb_has_incompat_feature(sbp, XFS_SB_FEAT_INCOMPAT_ZONED);
 }
 
 #endif	/* __LIBXFS_H__ */

@@ -36,6 +36,25 @@ syscall(__NR_copy_file_range, 0, 0, 0, 0, 0, 0);
   ])
 
 #
+# Check if we have a cachestat system call (Linux)
+#
+AC_DEFUN([AC_HAVE_CACHESTAT],
+  [ AC_MSG_CHECKING([for cachestat])
+    AC_LINK_IFELSE(
+    [	AC_LANG_PROGRAM([[
+#include <unistd.h>
+#include <linux/mman.h>
+#include <asm/unistd.h>
+	]], [[
+syscall(__NR_cachestat, 0, 0, 0, 0);
+	]])
+    ], have_cachestat=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_cachestat)
+  ])
+
+#
 # Check if we need to override the system struct fsxattr with
 # the internal definition.  This /only/ happens if the system
 # actually defines struct fsxattr /and/ the system definition
@@ -96,6 +115,34 @@ AC_DEFUN([AC_NEED_INTERNAL_FSCRYPT_POLICY_V2],
       [#include <linux/fs.h>]
     )
     AC_SUBST(need_internal_fscrypt_policy_v2)
+  ])
+
+#
+# Check if we need to override the system struct statx with
+# the internal definition.  This /only/ happens if the system
+# actually defines struct statx /and/ the system definition
+# is missing certain fields.
+#
+AC_DEFUN([AC_NEED_INTERNAL_STATX],
+  [ AC_CHECK_TYPE(struct statx,
+      [
+        AC_CHECK_MEMBER(struct statx.stx_atomic_write_unit_max_opt,
+          ,
+          need_internal_statx=yes,
+          [[
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <sys/stat.h>
+
+#ifndef STATX_TYPE
+#include <linux/stat.h>
+#endif
+]]
+        )
+      ],need_internal_statx=yes,
+      [#include <linux/stat.h>]
+    )
+    AC_SUBST(need_internal_statx)
   ])
 
 #
@@ -234,4 +281,69 @@ AC_DEFUN([AC_PACKAGE_CHECK_LTO],
     AC_SUBST(have_lto)
     AC_SUBST(lto_cflags)
     AC_SUBST(lto_ldflags)
+  ])
+
+#
+# Check if we have a file_getattr system call (Linux)
+#
+AC_DEFUN([AC_HAVE_FILE_GETATTR],
+  [AC_MSG_CHECKING([for file_getattr syscall])
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <sys/syscall.h>
+#include <unistd.h>
+  ]], [[
+syscall(__NR_file_getattr, 0, 0, 0, 0, 0);
+  ]])
+    ], have_file_getattr=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_file_getattr)
+  ])
+
+#
+# Check if strerror_r returns an int, as opposed to a char *, because there are
+# two versions of this function, with differences that are hard to detect.
+#
+# GNU strerror_r returns a pointer to a string on success, but the returned
+# pointer might point to a static buffer and not buf, so you have to use the
+# return value.  The declaration has the __warn_unused_result__ attribute to
+# enforce this.
+#
+# XSI strerror_r always writes to buf and returns 0 on success, -1 on error.
+#
+# How do you select a particular version?  By defining macros, of course!
+# _GNU_SOURCE always gets you the GNU version, and _POSIX_C_SOURCE >= 200112L
+# gets you the XSI version but only if _GNU_SOURCE isn't defined.
+#
+# The build system #defines _GNU_SOURCE unconditionally, so when compiling
+# against glibc we get the GNU version.  However, when compiling against musl,
+# the _GNU_SOURCE definition does nothing and we get the XSI version anyway.
+# Not definining _GNU_SOURCE breaks the build in many areas, so we'll create
+# yet another #define for just this weird quirk so that we can patch around it
+# in the one place we need it.
+#
+# Note that we have to force erroring out on the int conversion warnings
+# because C doesn't consider it a hard error to cast a char pointer to an int
+# even when CFLAGS contains -std=gnu11.
+AC_DEFUN([AC_STRERROR_R_RETURNS_STRING],
+  [AC_MSG_CHECKING([if strerror_r returns char *])
+    OLD_CFLAGS="$CFLAGS"
+    CFLAGS="$CFLAGS -Wall -Werror"
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <string.h>
+  ]], [[
+char buf[1024];
+puts(strerror_r(0, buf, sizeof(buf)));
+  ]])
+    ],
+       strerror_r_returns_string=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    CFLAGS="$OLD_CFLAGS"
+    AC_SUBST(strerror_r_returns_string)
   ])

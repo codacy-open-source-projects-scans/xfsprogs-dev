@@ -8,6 +8,20 @@
 #include "fsgeom.h"
 #include "util.h"
 
+static inline const char *
+rtdev_name(
+	struct xfs_fsop_geom	*geo,
+	const char		*rtname)
+{
+	if (!geo->rtblocks)
+		return _("none");
+	if (geo->rtstart)
+		return _("internal");
+	if (!rtname)
+		return _("external");
+	return rtname;
+}
+
 void
 xfs_report_geom(
 	struct xfs_fsop_geom	*geo,
@@ -33,6 +47,8 @@ xfs_report_geom(
 	int			nrext64;
 	int			exchangerange;
 	int			parent;
+	int			metadir;
+	int			zoned;
 
 	isint = geo->logstart > 0;
 	lazycount = geo->flags & XFS_FSOP_GEOM_FLAGS_LAZYSB ? 1 : 0;
@@ -53,24 +69,28 @@ xfs_report_geom(
 	nrext64 = geo->flags & XFS_FSOP_GEOM_FLAGS_NREXT64 ? 1 : 0;
 	exchangerange = geo->flags & XFS_FSOP_GEOM_FLAGS_EXCHANGE_RANGE ? 1 : 0;
 	parent = geo->flags & XFS_FSOP_GEOM_FLAGS_PARENT ? 1 : 0;
+	metadir = geo->flags & XFS_FSOP_GEOM_FLAGS_METADIR ? 1 : 0;
+	zoned = geo->flags & XFS_FSOP_GEOM_FLAGS_ZONED ? 1 : 0;
 
 	printf(_(
 "meta-data=%-22s isize=%-6d agcount=%u, agsize=%u blks\n"
 "         =%-22s sectsz=%-5u attr=%u, projid32bit=%u\n"
 "         =%-22s crc=%-8u finobt=%u, sparse=%u, rmapbt=%u\n"
 "         =%-22s reflink=%-4u bigtime=%u inobtcount=%u nrext64=%u\n"
-"         =%-22s exchange=%-3u\n"
+"         =%-22s exchange=%-3u metadir=%u\n"
 "data     =%-22s bsize=%-6u blocks=%llu, imaxpct=%u\n"
 "         =%-22s sunit=%-6u swidth=%u blks\n"
 "naming   =version %-14u bsize=%-6u ascii-ci=%d, ftype=%d, parent=%d\n"
 "log      =%-22s bsize=%-6d blocks=%u, version=%d\n"
 "         =%-22s sectsz=%-5u sunit=%d blks, lazy-count=%d\n"
-"realtime =%-22s extsz=%-6d blocks=%lld, rtextents=%lld\n"),
+"realtime =%-22s extsz=%-6d blocks=%lld, rtextents=%lld\n"
+"         =%-22s rgcount=%-4d rgsize=%u extents\n"
+"         =%-22s zoned=%-6d start=%llu reserved=%llu\n"),
 		mntpoint, geo->inodesize, geo->agcount, geo->agblocks,
 		"", geo->sectsize, attrversion, projid32bit,
 		"", crcs_enabled, finobt_enabled, spinodes, rmapbt_enabled,
 		"", reflink_enabled, bigtime_enabled, inobtcount, nrext64,
-		"", exchangerange,
+		"", exchangerange, metadir,
 		"", geo->blocksize, (unsigned long long)geo->datablocks,
 			geo->imaxpct,
 		"", geo->sunit, geo->swidth,
@@ -78,9 +98,11 @@ xfs_report_geom(
 		isint ? _("internal log") : logname ? logname : _("external"),
 			geo->blocksize, geo->logblocks, logversion,
 		"", geo->logsectsize, geo->logsunit / geo->blocksize, lazycount,
-		!geo->rtblocks ? _("none") : rtname ? rtname : _("external"),
+		rtdev_name(geo, rtname),
 		geo->rtextsize * geo->blocksize, (unsigned long long)geo->rtblocks,
-			(unsigned long long)geo->rtextents);
+			(unsigned long long)geo->rtextents,
+		"", geo->rgcount, geo->rgextents,
+		"", zoned, geo->rtstart, geo->rtreserved);
 }
 
 /* Try to obtain the xfs geometry.  On error returns a negative error code. */
@@ -206,6 +228,24 @@ xfrog_ag_geometry(
 
 	ageo->ag_number = agno;
 	ret = ioctl(fd, XFS_IOC_AG_GEOMETRY, ageo);
+	if (ret)
+		return -errno;
+	return 0;
+}
+
+/*
+ * Try to obtain a rt group's geometry.  Returns zero or a negative error code.
+ */
+int
+xfrog_rtgroup_geometry(
+	int			fd,
+	unsigned int		rgno,
+	struct xfs_rtgroup_geometry	*rgeo)
+{
+	int			ret;
+
+	rgeo->rg_number = rgno;
+	ret = ioctl(fd, XFS_IOC_RTGROUP_GEOMETRY, rgeo);
 	if (ret)
 		return -errno;
 	return 0;

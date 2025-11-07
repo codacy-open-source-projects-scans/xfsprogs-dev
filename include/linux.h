@@ -16,6 +16,7 @@
 #include <sys/param.h>
 #include <sys/sysmacros.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <inttypes.h>
 #include <malloc.h>
 #include <getopt.h>
@@ -37,6 +38,7 @@
 #endif
 #include <unistd.h>
 #include <assert.h>
+#include <linux/magic.h> /* super block magic numbers */
 
 static __inline__ int xfsctl(const char *path, int fd, int cmd, void *p)
 {
@@ -60,7 +62,7 @@ static __inline__ int platform_test_xfs_fd(int fd)
 		return 0;
 	if (!S_ISREG(statbuf.st_mode) && !S_ISDIR(statbuf.st_mode))
 		return 0;
-	return (statfsbuf.f_type == 0x58465342);	/* XFSB */
+	return statfsbuf.f_type == XFS_SUPER_MAGIC;
 }
 
 static __inline__ int platform_test_xfs_path(const char *path)
@@ -201,6 +203,25 @@ struct fsxattr {
 };
 #endif
 
+/*
+ * Use FILE_ATTR_SIZE_VER0 (linux/fs.h) instead of build system
+ * HAVE_FILE_GETATTR as this header could be included in other places where
+ * HAVE_FILE_GETATTR is not defined (e.g. xfstests's conftest.c in ./configure)
+ */
+#ifndef FILE_ATTR_SIZE_VER0
+/*
+ * We need to define file_attr if it's missing to know how to convert it to
+ * fsxattr
+ */
+struct file_attr {
+	__u32	fa_xflags;
+	__u32	fa_extsize;
+	__u32	fa_nextents;
+	__u32	fa_projid;
+	__u32	fa_cowextsize;
+};
+#endif
+
 #ifndef FS_IOC_FSGETXATTR
 /*
  * Flags for the fsx_xflags field
@@ -234,6 +255,11 @@ struct fsxattr {
 /* Atomic Write */
 #ifndef RWF_ATOMIC
 #define RWF_ATOMIC	((__kernel_rwf_t)0x00000040)
+#endif
+
+/* buffered IO that drops the cache after reading or writing data */
+#ifndef RWF_DONTCACHE
+#define RWF_DONTCACHE	((__kernel_rwf_t)0x00000080)
 #endif
 
 /*

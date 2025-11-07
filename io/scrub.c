@@ -41,6 +41,12 @@ scrub_help(void)
 " Known metadata scrub types are:"));
 	for (i = 0, d = xfrog_scrubbers; i < XFS_SCRUB_TYPE_NR; i++, d++)
 		printf(" %s", d->name);
+	printf(_(
+"\n"
+"\n"
+" Known metapath scrub arguments are:"));
+	for (i = 0, d = xfrog_metapaths; i < XFS_SCRUB_METAPATH_NR; i++, d++)
+		printf(" %s", d->name);
 	printf("\n");
 }
 
@@ -125,6 +131,93 @@ parse_none(
 	return true;
 }
 
+static bool
+parse_metapath(
+	int		argc,
+	char		**argv,
+	int		optind,
+	__u64		*ino,
+	__u32		*group)
+{
+	char		*p;
+	unsigned long long control;
+	unsigned long	control2 = 0;
+	int		i;
+
+	if (optind != argc - 1 && optind != argc - 2) {
+		fprintf(stderr, _("Must specify metapath number.\n"));
+		return false;
+	}
+
+	for (i = 0; i < XFS_SCRUB_METAPATH_NR; i++) {
+		if (!strcmp(argv[optind], xfrog_metapaths[i].name)) {
+			control = i;
+			goto find_group;
+		}
+	}
+
+	control = strtoll(argv[optind], &p, 0);
+	if (*p != '\0') {
+		fprintf(stderr, _("Bad metapath number '%s'.\n"),
+				argv[optind]);
+		return false;
+	}
+
+find_group:
+	if (xfrog_metapaths[control].group == XFROG_SCRUB_GROUP_RTGROUP) {
+		if (optind == argc - 1) {
+			fprintf(stderr,
+_("%s: Metapath requires a group number.\n"),
+					xfrog_metapaths[*ino].name);
+			return false;
+		}
+		control2 = strtoul(argv[optind + 1], &p, 0);
+		if (*p != '\0') {
+			fprintf(stderr,
+ _("Bad group number '%s'.\n"),
+				argv[optind + 1]);
+			return false;
+		}
+	} else {
+		if (optind == argc - 2) {
+			fprintf(stderr,
+_("%s: Metapath does not take a second argument.\n"),
+					xfrog_metapaths[*ino].name);
+			return false;
+		}
+	}
+
+	*ino = control;
+	*group = control2;
+	return true;
+}
+
+static bool
+parse_rtgroup(
+	int		argc,
+	char		**argv,
+	int		optind,
+	__u32		*rgno)
+{
+	char		*p;
+	unsigned long	control;
+
+	if (optind != argc - 1) {
+		fprintf(stderr, _("Must specify one rtgroup number.\n"));
+		return false;
+	}
+
+	control = strtoul(argv[optind], &p, 0);
+	if (*p != '\0') {
+		fprintf(stderr, _("Bad rtgroup number '%s'.\n"),
+				argv[optind]);
+		return false;
+	}
+
+	*rgno = control;
+	return true;
+}
+
 static int
 parse_args(
 	int				argc,
@@ -170,6 +263,13 @@ parse_args(
 	meta->sm_flags = flags;
 
 	switch (d->group) {
+	case XFROG_SCRUB_GROUP_METAPATH:
+		if (!parse_metapath(argc, argv, optind, &meta->sm_ino,
+							&meta->sm_agno)) {
+			exitcode = 1;
+			return command_usage(cmdinfo);
+		}
+		break;
 	case XFROG_SCRUB_GROUP_INODE:
 		if (!parse_inode(argc, argv, optind, &meta->sm_ino,
 						     &meta->sm_gen)) {
@@ -180,6 +280,12 @@ parse_args(
 	case XFROG_SCRUB_GROUP_AGHEADER:
 	case XFROG_SCRUB_GROUP_PERAG:
 		if (!parse_agno(argc, argv, optind, &meta->sm_agno)) {
+			exitcode = 1;
+			return command_usage(cmdinfo);
+		}
+		break;
+	case XFROG_SCRUB_GROUP_RTGROUP:
+		if (!parse_rtgroup(argc, argv, optind, &meta->sm_agno)) {
 			exitcode = 1;
 			return command_usage(cmdinfo);
 		}
@@ -244,7 +350,7 @@ scrub_init(void)
 	scrub_cmd.argmin = 1;
 	scrub_cmd.argmax = -1;
 	scrub_cmd.flags = CMD_NOMAP_OK;
-	scrub_cmd.args = _("type [agno|ino gen]");
+	scrub_cmd.args = _("type [agno|ino gen|metapath]");
 	scrub_cmd.oneline = _("scrubs filesystem metadata");
 	scrub_cmd.help = scrub_help;
 
@@ -274,6 +380,12 @@ repair_help(void)
 "\n"
 " Known metadata repair types are:"));
 	for (i = 0, d = xfrog_scrubbers; i < XFS_SCRUB_TYPE_NR; i++, d++)
+		printf(" %s", d->name);
+	printf(_(
+"\n"
+"\n"
+" Known metapath repair arguments are:"));
+	for (i = 0, d = xfrog_metapaths; i < XFS_SCRUB_METAPATH_NR; i++, d++)
 		printf(" %s", d->name);
 	printf("\n");
 }
@@ -327,7 +439,7 @@ repair_init(void)
 	repair_cmd.argmin = 1;
 	repair_cmd.argmax = -1;
 	repair_cmd.flags = CMD_NOMAP_OK;
-	repair_cmd.args = _("type [agno|ino gen]");
+	repair_cmd.args = _("type [agno|ino gen|metapath]");
 	repair_cmd.oneline = _("repairs filesystem metadata");
 	repair_cmd.help = repair_help;
 
@@ -487,6 +599,8 @@ scrubv_f(
 		group = XFROG_SCRUB_GROUP_ISCAN;
 	else if (!strcmp(argv[optind], "summary"))
 		group = XFROG_SCRUB_GROUP_SUMMARY;
+	else if (!strcmp(argv[optind], "rtgroup"))
+		group = XFROG_SCRUB_GROUP_RTGROUP;
 	else {
 		printf(_("Unknown group '%s'.\n"), argv[optind]);
 		exitcode = 1;
@@ -495,6 +609,13 @@ scrubv_f(
 	optind++;
 
 	switch (group) {
+	case XFROG_SCRUB_GROUP_METAPATH:
+		if (!parse_metapath(argc, argv, optind, &scrubv.head.svh_ino,
+				    &scrubv.head.svh_agno)) {
+			exitcode = 1;
+			return command_usage(&scrubv_cmd);
+		}
+		break;
 	case XFROG_SCRUB_GROUP_INODE:
 		if (!parse_inode(argc, argv, optind, &scrubv.head.svh_ino,
 						     &scrubv.head.svh_gen)) {
@@ -514,6 +635,12 @@ scrubv_f(
 	case XFROG_SCRUB_GROUP_ISCAN:
 	case XFROG_SCRUB_GROUP_NONE:
 		if (!parse_none(argc, optind)) {
+			exitcode = 1;
+			return command_usage(&scrubv_cmd);
+		}
+		break;
+	case XFROG_SCRUB_GROUP_RTGROUP:
+		if (!parse_rtgroup(argc, argv, optind, &scrubv.head.svh_agno)) {
 			exitcode = 1;
 			return command_usage(&scrubv_cmd);
 		}

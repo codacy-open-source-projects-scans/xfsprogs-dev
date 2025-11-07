@@ -88,6 +88,15 @@ The allocation group number must be given in
 .BR sm_ino " and " sm_gen
 must be zero.
 
+.PP
+.TP
+.B XFS_SCRUB_TYPE_RGSUPER
+Examine a given realtime allocation group's superblock.
+The realtime allocation group number must be given in
+.IR sm_agno "."
+.IR sm_ino " and " sm_gen
+must be zero.
+
 .TP
 .B XFS_SCRUB_TYPE_INODE
 Examine a given inode record for obviously incorrect values and
@@ -171,11 +180,13 @@ The link to examine can be specified in the same manner as
 .PP
 .nf
 .B XFS_SCRUB_TYPE_RTBITMAP
+.B XFS_SCRUB_TYPE_RTSUM
+.B XFS_SCRUB_TYPE_RTRMAPBT
 .fi
 .TP
-.B XFS_SCRUB_TYPE_RTSUM
-Examine the realtime block bitmap and realtime summary inodes for
-corruption.
+.B XFS_SCRUB_TYPE_RTREFCBT
+Examine a given realtime allocation group's free space bitmap, summary file,
+reverse mapping btree, or reference count btree, respectively.
 
 .PP
 .nf
@@ -200,6 +211,56 @@ Scan all inodes in the filesystem to verify each file's link count.
 Mark everything healthy after a clean scrub run.
 This clears out all the indirect health problem markers that might remain
 in the system.
+
+.TP
+.B XFS_SCRUB_TYPE_METAPATH
+Check that a metadata directory path actually points to the active metadata
+inode.
+Metadata inodes are usually cached for the duration of the mount, so this
+scrubber ensures that the same inode will still be reachable after an unmount
+and mount cycle.
+Discrepancies can happen if the directory or parent pointer scrubbers rebuild
+a metadata directory but lose a link in the process.
+The
+.B sm_ino
+field should be passed one of the following special values to communicate which
+path to check:
+
+.RS 7
+.TP
+.B XFS_SCRUB_METAPATH_RTDIR
+Realtime metadata file subdirectory.
+.TP
+.B XFS_SCRUB_METAPATH_RTBITMAP
+Realtime bitmap file.
+.TP
+.B XFS_SCRUB_METAPATH_RTSUMMARY
+Realtime summary file.
+.TP
+.B XFS_SCRUB_METAPATH_QUOTADIR
+Quota metadata file subdirectory.
+.TP
+.B XFS_SCRUB_METAPATH_USRQUOTA
+User quota file.
+.TP
+.B XFS_SCRUB_METAPATH_GRPQUOTA
+Group quota file.
+.TP
+.B XFS_SCRUB_METAPATH_PRJQUOTA
+Project quota file.
+.TP
+.B XFS_SCRUB_METAPATH_RTRMAPBT
+Realtime rmap btree file.
+.TP
+.B XFS_SCRUB_METAPATH_RTREFCOUNTBT
+Realtime reference count btree file.
+.RE
+
+The values of
+.I sm_agno
+and
+.I sm_gen
+must be zero.
 .RE
 
 .PD 1

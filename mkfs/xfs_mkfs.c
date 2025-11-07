@@ -6,6 +6,8 @@
 #include "libfrog/util.h"
 #include "libxfs.h"
 #include <ctype.h>
+#include <linux/blkzoned.h>
+#include "libxfs/xfs_zones.h"
 #include "xfs_multidisk.h"
 #include "libxcmd.h"
 #include "libfrog/fsgeom.h"
@@ -92,6 +94,7 @@ enum {
 	I_SPINODES,
 	I_NREXT64,
 	I_EXCHANGE,
+	I_MAX_ATOMIC_WRITE,
 	I_MAX_OPTS,
 };
 
@@ -121,6 +124,7 @@ enum {
 
 enum {
 	P_FILE = 0,
+	P_ATIME,
 	P_SLASHES,
 	P_MAX_OPTS,
 };
@@ -132,6 +136,12 @@ enum {
 	R_FILE,
 	R_NAME,
 	R_NOALIGN,
+	R_RGCOUNT,
+	R_RGSIZE,
+	R_CONCURRENCY,
+	R_ZONED,
+	R_START,
+	R_RESERVED,
 	R_MAX_OPTS,
 };
 
@@ -150,6 +160,13 @@ enum {
 	M_INOBTCNT,
 	M_BIGTIME,
 	M_AUTOFSCK,
+	M_METADIR,
+	M_UQUOTA,
+	M_GQUOTA,
+	M_PQUOTA,
+	M_UQNOENFORCE,
+	M_GQNOENFORCE,
+	M_PQNOENFORCE,
 	M_MAX_OPTS,
 };
 
@@ -474,6 +491,7 @@ static struct opt_params iopts = {
 		[I_SPINODES] = "sparse",
 		[I_NREXT64] = "nrext64",
 		[I_EXCHANGE] = "exchange",
+		[I_MAX_ATOMIC_WRITE] = "max_atomic_write",
 		[I_MAX_OPTS] = NULL,
 	},
 	.subopt_params = {
@@ -534,6 +552,13 @@ static struct opt_params iopts = {
 		  .minval = 0,
 		  .maxval = 1,
 		  .defaultval = 1,
+		},
+		{ .index = I_MAX_ATOMIC_WRITE,
+		  .conflicts = { { NULL, LAST_CONFLICT } },
+		  .convert = true,
+		  .minval = 1,
+		  .maxval = 1ULL << 30, /* 1GiB */
+		  .defaultval = SUBOPT_NEEDS_VAL,
 		},
 	},
 };
@@ -699,6 +724,7 @@ static struct opt_params popts = {
 	.ini_section = "proto",
 	.subopts = {
 		[P_FILE] = "file",
+		[P_ATIME] = "atime",
 		[P_SLASHES] = "slashes_are_spaces",
 		[P_MAX_OPTS] = NULL,
 	},
@@ -706,6 +732,12 @@ static struct opt_params popts = {
 		{ .index = P_FILE,
 		  .conflicts = { { NULL, LAST_CONFLICT } },
 		  .defaultval = SUBOPT_NEEDS_VAL,
+		},
+		{ .index = P_ATIME,
+		  .conflicts = { { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
 		},
 		{ .index = P_SLASHES,
 		  .conflicts = { { NULL, LAST_CONFLICT } },
@@ -726,6 +758,12 @@ static struct opt_params ropts = {
 		[R_FILE] = "file",
 		[R_NAME] = "name",
 		[R_NOALIGN] = "noalign",
+		[R_RGCOUNT] = "rgcount",
+		[R_RGSIZE] = "rgsize",
+		[R_CONCURRENCY] = "concurrency",
+		[R_ZONED] = "zoned",
+		[R_START] = "start",
+		[R_RESERVED] = "reserved",
 		[R_MAX_OPTS] = NULL,
 	},
 	.subopt_params = {
@@ -764,6 +802,54 @@ static struct opt_params ropts = {
 		  .maxval = 1,
 		  .defaultval = 1,
 		  .conflicts = { { NULL, LAST_CONFLICT } },
+		},
+		{ .index = R_RGCOUNT,
+		  .conflicts = { { &ropts, R_RGSIZE },
+				 { &ropts, R_CONCURRENCY },
+				 { NULL, LAST_CONFLICT } },
+		  .minval = 1,
+		  .maxval = XFS_MAX_RGNUMBER,
+		  .defaultval = SUBOPT_NEEDS_VAL,
+		},
+		{ .index = R_RGSIZE,
+		  .conflicts = { { &ropts, R_RGCOUNT },
+				 { &ropts, R_CONCURRENCY },
+				 { NULL, LAST_CONFLICT } },
+		  .convert = true,
+		  .minval = 0,
+		  .maxval = (unsigned long long)XFS_MAX_RGBLOCKS << XFS_MAX_BLOCKSIZE_LOG,
+		  .defaultval = SUBOPT_NEEDS_VAL,
+		},
+		{ .index = R_CONCURRENCY,
+		  .conflicts = { { &ropts, R_RGCOUNT },
+				 { &ropts, R_RGSIZE },
+				 { NULL, LAST_CONFLICT } },
+		  .convert = true,
+		  .minval = 0,
+		  .maxval = INT_MAX,
+		  .defaultval = 1,
+		},
+		{ .index = R_ZONED,
+		  .conflicts = { { &ropts, R_EXTSIZE },
+				 { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = R_START,
+		  .conflicts = { { &ropts, R_DEV },
+				 { NULL, LAST_CONFLICT } },
+		  .convert = true,
+		  .minval = 0,
+		  .maxval = LLONG_MAX,
+		  .defaultval = SUBOPT_NEEDS_VAL,
+		},
+		{ .index = R_RESERVED,
+		  .conflicts = { { NULL, LAST_CONFLICT } },
+		  .convert = true,
+		  .minval = 0,
+		  .maxval = LLONG_MAX,
+		  .defaultval = SUBOPT_NEEDS_VAL,
 		},
 	},
 };
@@ -812,6 +898,13 @@ static struct opt_params mopts = {
 		[M_INOBTCNT] = "inobtcount",
 		[M_BIGTIME] = "bigtime",
 		[M_AUTOFSCK] = "autofsck",
+		[M_METADIR] = "metadir",
+		[M_UQUOTA] = "uquota",
+		[M_GQUOTA] = "gquota",
+		[M_PQUOTA] = "pquota",
+		[M_UQNOENFORCE] = "uqnoenforce",
+		[M_GQNOENFORCE] = "gqnoenforce",
+		[M_PQNOENFORCE] = "pqnoenforce",
 		[M_MAX_OPTS] = NULL,
 	},
 	.subopt_params = {
@@ -857,6 +950,54 @@ static struct opt_params mopts = {
 		},
 		{ .index = M_AUTOFSCK,
 		  .conflicts = { { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = M_METADIR,
+		  .conflicts = { { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = M_UQUOTA,
+		  .conflicts = { { &mopts, M_UQNOENFORCE },
+				 { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = M_GQUOTA,
+		  .conflicts = { { &mopts, M_GQNOENFORCE },
+				 { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = M_PQUOTA,
+		  .conflicts = { { &mopts, M_GQNOENFORCE },
+				 { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = M_UQNOENFORCE,
+		  .conflicts = { { &mopts, M_UQUOTA },
+				 { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = M_GQNOENFORCE,
+		  .conflicts = { { &mopts, M_GQUOTA },
+				 { NULL, LAST_CONFLICT } },
+		  .minval = 0,
+		  .maxval = 1,
+		  .defaultval = 1,
+		},
+		{ .index = M_PQNOENFORCE,
+		  .conflicts = { { &mopts, M_PQUOTA },
+				 { NULL, LAST_CONFLICT } },
 		  .minval = 0,
 		  .maxval = 1,
 		  .defaultval = 1,
@@ -913,10 +1054,15 @@ struct sb_feat_args {
 	bool	reflink;		/* XFS_SB_FEAT_RO_COMPAT_REFLINK */
 	bool	inobtcnt;		/* XFS_SB_FEAT_RO_COMPAT_INOBTCNT */
 	bool	bigtime;		/* XFS_SB_FEAT_INCOMPAT_BIGTIME */
+	bool	metadir;		/* XFS_SB_FEAT_INCOMPAT_METADIR */
 	bool	nodalign;
 	bool	nortalign;
 	bool	nrext64;
 	bool	exchrange;		/* XFS_SB_FEAT_INCOMPAT_EXCHRANGE */
+	bool	zoned;
+	bool	zone_gaps;
+
+	uint16_t qflags;
 };
 
 struct cli_params {
@@ -931,12 +1077,16 @@ struct cli_params {
 	/* parameters that depend on sector/block size being validated. */
 	char	*dsize;
 	char	*agsize;
+	char	*rgsize;
 	char	*dsu;
 	char	*dirblocksize;
 	char	*logsize;
 	char	*lsu;
 	char	*rtextsize;
 	char	*rtsize;
+	char	*rtstart;
+	uint64_t rtreserved;
+	char	*max_atomic_write;
 
 	/* parameters where 0 is a valid CLI value */
 	int	dsunit;
@@ -947,14 +1097,17 @@ struct cli_params {
 	int	lsunit;
 	int	is_supported;
 	int	proto_slashes_are_spaces;
+	int	proto_atime;
 	int	data_concurrency;
 	int	log_concurrency;
+	int	rtvol_concurrency;
+	int	imaxpct;
 
 	/* parameters where 0 is not a valid value */
 	int64_t	agcount;
+	int64_t	rgcount;
 	int	inodesize;
 	int	inopblock;
-	int	imaxpct;
 	int	lsectorsize;
 	uuid_t	uuid;
 
@@ -1008,6 +1161,9 @@ struct mkfs_params {
 	uint64_t	agsize;
 	uint64_t	agcount;
 
+	uint64_t	rgsize;
+	uint64_t	rgcount;
+
 	int		imaxpct;
 
 	bool		loginternal;
@@ -1018,6 +1174,10 @@ struct mkfs_params {
 	char		*label;
 
 	struct sb_feat_args	sb_feat;
+	uint64_t	rtstart;
+	uint64_t	rtreserved;
+
+	uint64_t	max_atomic_write;
 };
 
 /*
@@ -1048,14 +1208,17 @@ usage( void )
 /* blocksize */		[-b size=num]\n\
 /* config file */	[-c options=xxx]\n\
 /* metadata */		[-m crc=0|1,finobt=0|1,uuid=xxx,rmapbt=0|1,reflink=0|1,\n\
-			    inobtcount=0|1,bigtime=0|1,autofsck=xxx]\n\
+			    inobtcount=0|1,bigtime=0|1,autofsck=xxx,\n\
+			    metadir=0|1]\n\
+/* quota */		[-m uquota|uqnoenforce,gquota|gqnoenforce,\n\
+			    pquota|pqnoenforce]\n\
 /* data subvol */	[-d agcount=n,agsize=n,file,name=xxx,size=num,\n\
 			    (sunit=value,swidth=value|su=num,sw=num|noalign),\n\
 			    sectsize=num,concurrency=num]\n\
 /* force overwrite */	[-f]\n\
 /* inode size */	[-i perblock=n|size=num,maxpct=n,attr=0|1|2,\n\
 			    projid32bit=0|1,sparse=0|1,nrext64=0|1,\n\
-			    exchange=0|1]\n\
+			    exchange=0|1,max_atomic_write=n]\n\
 /* no discard */	[-K]\n\
 /* log subvol */	[-l agnum=n,internal,size=num,logdev=xxx,version=n\n\
 			    sunit=value|su=num,sectsize=num,lazy-count=0|1,\n\
@@ -1064,8 +1227,10 @@ usage( void )
 /* naming */		[-n size=num,version=2|ci,ftype=0|1,parent=0|1]]\n\
 /* no-op info only */	[-N]\n\
 /* prototype file */	[-p fname]\n\
+/* populate from directory */	[-p dirname,atime=0|1]\n\
 /* quiet */		[-q]\n\
-/* realtime subvol */	[-r extsize=num,size=num,rtdev=xxx]\n\
+/* realtime subvol */	[-r extsize=num,size=num,rtdev=xxx,rgcount=n,rgsize=n,\n\
+			    concurrency=num,zoned=0|1,start=n,reserved=n]\n\
 /* sectorsize */	[-s size=num]\n\
 /* version */		[-V]\n\
 			devicename\n\
@@ -1432,6 +1597,34 @@ discard_blocks(int fd, uint64_t nsectors, int quiet)
 		printf("Done.\n");
 }
 
+static void
+reset_zones(
+	struct mkfs_params	*cfg,
+	int			fd,
+	uint64_t		start_sector,
+	uint64_t		nsectors,
+	int			quiet)
+{
+	struct blk_zone_range range = {
+		.sector		= start_sector,
+		.nr_sectors	= nsectors,
+	};
+
+	if (!quiet) {
+		printf("Resetting zones...");
+		fflush(stdout);
+	}
+
+	if (ioctl(fd, BLKRESETZONE, &range) < 0) {
+		if (!quiet)
+			printf(" FAILED (%d)\n", -errno);
+		exit(1);
+	}
+
+	if (!quiet)
+		printf("Done.\n");
+}
+
 static __attribute__((noreturn)) void
 illegal_option(
 	const char		*value,
@@ -1630,7 +1823,7 @@ set_data_concurrency(
 	 * "nr_cpus" or "1" means set the concurrency level to the CPU count.
 	 * If this cannot be determined, fall back to the default AG geometry.
 	 */
-	if (!strcmp(value, "nr_cpus"))
+	if (!value || !strcmp(value, "nr_cpus"))
 		optnum = 1;
 	else
 		optnum = getnum(value, opts, subopt);
@@ -1756,6 +1949,9 @@ inode_opts_parser(
 	case I_EXCHANGE:
 		cli->sb_feat.exchrange = getnum(value, opts, subopt);
 		break;
+	case I_MAX_ATOMIC_WRITE:
+		cli->max_atomic_write = getstr(value, opts, subopt);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -1775,7 +1971,7 @@ set_log_concurrency(
 	 * "nr_cpus" or 1 means set the concurrency level to the CPU count.  If
 	 * this cannot be determined, fall back to the default computation.
 	 */
-	if (!strcmp(value, "nr_cpus"))
+	if (!value || !strcmp(value, "nr_cpus"))
 		optnum = 1;
 	else
 		optnum = getnum(value, opts, subopt);
@@ -1883,6 +2079,33 @@ meta_opts_parser(
 				illegal(value, "m autofsck");
 		}
 		break;
+	case M_METADIR:
+		cli->sb_feat.metadir = getnum(value, opts, subopt);
+		break;
+	case M_UQUOTA:
+		if (getnum(value, opts, subopt))
+			cli->sb_feat.qflags |= XFS_UQUOTA_ACCT | XFS_UQUOTA_ENFD;
+		break;
+	case M_GQUOTA:
+		if (getnum(value, opts, subopt))
+			cli->sb_feat.qflags |= XFS_GQUOTA_ACCT | XFS_GQUOTA_ENFD;
+		break;
+	case M_PQUOTA:
+		if (getnum(value, opts, subopt))
+			cli->sb_feat.qflags |= XFS_PQUOTA_ACCT | XFS_PQUOTA_ENFD;
+		break;
+	case M_UQNOENFORCE:
+		if (getnum(value, opts, subopt))
+			cli->sb_feat.qflags |= XFS_UQUOTA_ACCT;
+		break;
+	case M_GQNOENFORCE:
+		if (getnum(value, opts, subopt))
+			cli->sb_feat.qflags |= XFS_GQUOTA_ACCT;
+		break;
+	case M_PQNOENFORCE:
+		if (getnum(value, opts, subopt))
+			cli->sb_feat.qflags |= XFS_PQUOTA_ACCT;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -1933,6 +2156,9 @@ proto_opts_parser(
 	case P_SLASHES:
 		cli->proto_slashes_are_spaces = getnum(value, opts, subopt);
 		break;
+	case P_ATIME:
+		cli->proto_atime = getnum(value, opts, subopt);
+		break;
 	case P_FILE:
 		fallthrough;
 	default:
@@ -1950,6 +2176,31 @@ proto_opts_parser(
 		break;
 	}
 	return 0;
+}
+
+static void
+set_rtvol_concurrency(
+	struct opt_params	*opts,
+	int			subopt,
+	struct cli_params	*cli,
+	const char		*value)
+{
+	long long		optnum;
+
+	/*
+	 * "nr_cpus" or "1" means set the concurrency level to the CPU count.
+	 * If this cannot be determined, fall back to the default rtgroup
+	 * geometry.
+	 */
+	if (!value || !strcmp(value, "nr_cpus"))
+		optnum = 1;
+	else
+		optnum = getnum(value, opts, subopt);
+
+	if (optnum == 1)
+		cli->rtvol_concurrency = nr_cpus();
+	else
+		cli->rtvol_concurrency = optnum;
 }
 
 static int
@@ -1975,6 +2226,24 @@ rtdev_opts_parser(
 		break;
 	case R_NOALIGN:
 		cli->sb_feat.nortalign = getnum(value, opts, subopt);
+		break;
+	case R_RGCOUNT:
+		cli->rgcount = getnum(value, opts, subopt);
+		break;
+	case R_RGSIZE:
+		cli->rgsize = getstr(value, opts, subopt);
+		break;
+	case R_CONCURRENCY:
+		set_rtvol_concurrency(opts, subopt, cli, value);
+		break;
+	case R_ZONED:
+		cli->sb_feat.zoned = getnum(value, opts, subopt);
+		break;
+	case R_START:
+		cli->rtstart = getstr(value, opts, subopt);
+		break;
+	case R_RESERVED:
+		cli->rtreserved = getnum(value, opts, subopt);
 		break;
 	default:
 		return -EINVAL;
@@ -2131,7 +2400,9 @@ validate_sectorsize(
 		 * advertised sector size of the device.  We use the physical
 		 * sector size unless the requested block size is smaller
 		 * than that, then we can use logical, but warn about the
-		 * inefficiency.
+		 * inefficiency.  If the file system has a RT device, the
+		 * sectorsize needs to be the maximum of the data and RT
+		 * device.
 		 *
 		 * Some architectures have a page size > XFS_MAX_SECTORSIZE.
 		 * In that case, a ramdisk or persistent memory device may
@@ -2141,8 +2412,18 @@ validate_sectorsize(
 			ft->data.physical_sector_size =
 				ft->data.logical_sector_size;
 		}
-
 		cfg->sectorsize = ft->data.physical_sector_size;
+
+		if (cli->xi->rt.name) {
+			if (ft->rt.physical_sector_size > XFS_MAX_SECTORSIZE) {
+				ft->rt.physical_sector_size =
+					ft->rt.logical_sector_size;
+			}
+
+			if (cfg->sectorsize < ft->rt.physical_sector_size)
+				cfg->sectorsize = ft->rt.physical_sector_size;
+		}
+
 		if (cfg->blocksize < cfg->sectorsize &&
 		    cfg->blocksize >= ft->data.logical_sector_size) {
 			fprintf(stderr,
@@ -2265,7 +2546,213 @@ _("Version 1 logs do not support sector size %d\n"),
 _("log stripe unit specified, using v2 logs\n"));
 		cli->sb_feat.log_version = 2;
 	}
+}
 
+struct zone_info {
+	/* number of zones, conventional or sequential */
+	unsigned int		nr_zones;
+	/* number of conventional zones */
+	unsigned int		nr_conv_zones;
+
+	/* size of the address space for a zone, in 512b blocks */
+	xfs_daddr_t		zone_size;
+	/* write capacity of a zone, in 512b blocks */
+	xfs_daddr_t		zone_capacity;
+};
+
+struct zone_topology {
+	struct zone_info	data;
+	struct zone_info	rt;
+	struct zone_info	log;
+};
+
+/* random size that allows efficient processing */
+#define ZONES_PER_IOCTL			16384
+
+static void
+report_zones(
+	const char		*name,
+	struct zone_info	*zi)
+{
+	struct blk_zone_report	*rep;
+	bool			found_seq = false;
+	int			fd, ret = 0;
+	uint64_t		device_size;
+	uint64_t		sector = 0;
+	size_t			rep_size;
+	unsigned int		i, n = 0;
+	struct stat		st;
+
+	fd = open(name, O_RDONLY);
+	if (fd < 0) {
+		fprintf(stderr, _("Failed to open RT device: %d.\n"), -errno);
+		exit(1);
+	}
+
+	if (fstat(fd, &st) < 0) {
+		ret = -EIO;
+		goto out_close;
+	}
+	if (!S_ISBLK(st.st_mode))
+		goto out_close;
+
+	if (ioctl(fd, BLKGETSIZE64, &device_size)) {
+		fprintf(stderr, _("Failed to get block size: %d.\n"), -errno);
+		exit(1);
+	}
+	if (ioctl(fd, BLKGETZONESZ, &zi->zone_size) || !zi->zone_size)
+		goto out_close; /* not zoned */
+
+	/* BLKGETSIZE64 reports a byte value */
+	device_size = BTOBB(device_size);
+	zi->nr_zones = device_size / zi->zone_size;
+	zi->nr_conv_zones = 0;
+
+	rep_size = sizeof(struct blk_zone_report) +
+		   sizeof(struct blk_zone) * ZONES_PER_IOCTL;
+	rep = malloc(rep_size);
+	if (!rep) {
+		fprintf(stderr,
+_("Failed to allocate memory for zone reporting.\n"));
+		exit(1);
+	}
+
+	while (n < zi->nr_zones) {
+		struct blk_zone *zones = (struct blk_zone *)(rep + 1);
+
+		memset(rep, 0, rep_size);
+		rep->sector = sector;
+		rep->nr_zones = ZONES_PER_IOCTL;
+
+		ret = ioctl(fd, BLKREPORTZONE, rep);
+		if (ret) {
+			fprintf(stderr,
+_("ioctl(BLKREPORTZONE) failed: %d!\n"), -errno);
+			exit(1);
+		}
+		if (!rep->nr_zones)
+			break;
+
+		for (i = 0; i < rep->nr_zones; i++) {
+			if (n >= zi->nr_zones)
+				break;
+
+			if (zones[i].len != zi->zone_size) {
+				fprintf(stderr,
+_("Inconsistent zone size!\n"));
+				exit(1);
+			}
+
+			switch (zones[i].type) {
+			case BLK_ZONE_TYPE_CONVENTIONAL:
+				/*
+				 * We can only use the conventional space at the
+				 * start of the device for metadata, so don't
+				 * count later conventional zones.  This is
+				 * not an error because we can use them for data
+				 * just fine.
+				 */
+				if (!found_seq)
+					zi->nr_conv_zones++;
+				break;
+			case BLK_ZONE_TYPE_SEQWRITE_REQ:
+				found_seq = true;
+				break;
+			case BLK_ZONE_TYPE_SEQWRITE_PREF:
+				fprintf(stderr,
+_("Sequential write preferred zones not supported.\n"));
+				exit(1);
+			default:
+				fprintf(stderr,
+_("Unknown zone type (0x%x) found.\n"), zones[i].type);
+				exit(1);
+			}
+
+			if (!n) {
+				zi->zone_capacity = zones[i].capacity;
+				if (zi->zone_capacity > zi->zone_size) {
+					fprintf(stderr,
+_("Zone capacity larger than zone size!\n"));
+					exit(1);
+				}
+			} else if (zones[i].capacity != zi->zone_capacity) {
+				fprintf(stderr,
+_("Inconsistent zone capacity!\n"));
+				exit(1);
+			}
+
+			n++;
+		}
+		sector = zones[rep->nr_zones - 1].start +
+			 zones[rep->nr_zones - 1].len;
+	}
+
+	free(rep);
+out_close:
+	close(fd);
+}
+
+static void
+validate_zoned(
+	struct mkfs_params	*cfg,
+	struct cli_params	*cli,
+	struct mkfs_default_params *dft,
+	struct zone_topology	*zt)
+{
+	if (!cli->xi->data.isfile) {
+		report_zones(cli->xi->data.name, &zt->data);
+		if (zt->data.nr_zones) {
+			if (!zt->data.nr_conv_zones) {
+				fprintf(stderr,
+_("Data devices requires conventional zones.\n"));
+				usage();
+			}
+			if (zt->data.zone_capacity != zt->data.zone_size) {
+				fprintf(stderr,
+_("Zone capacity equal to Zone size required for conventional zones.\n"));
+				usage();
+			}
+
+			cli->sb_feat.zoned = true;
+			cfg->rtstart =
+				zt->data.nr_conv_zones * zt->data.zone_capacity;
+		}
+	}
+
+	if (cli->xi->rt.name && !cli->xi->rt.isfile) {
+		report_zones(cli->xi->rt.name, &zt->rt);
+		if (zt->rt.nr_zones && !cli->sb_feat.zoned)
+			cli->sb_feat.zoned = true;
+		if (zt->rt.zone_size != zt->rt.zone_capacity)
+			cli->sb_feat.zone_gaps = true;
+	}
+
+	if (cli->xi->log.name && !cli->xi->log.isfile) {
+		report_zones(cli->xi->log.name, &zt->log);
+		if (zt->log.nr_zones) {
+			fprintf(stderr,
+_("Zoned devices not supported as log device!\n"));
+			usage();
+		}
+	}
+
+	if (cli->rtstart) {
+		/*
+		 * For zoned devices with conventional zones, cfg->rtstart is
+		 * set to the start of the first sequential write required zoned
+		 * above.  Don't allow the user to override it as that won't
+		 * work.
+		 */
+		if (cfg->rtstart) {
+			fprintf(stderr,
+_("rtstart override not allowed on zoned devices.\n"));
+			usage();
+		}
+		cfg->rtstart = getnum(cli->rtstart, &ropts, R_START) / 512;
+	}
+
+	if (cli->rtreserved)
+		cfg->rtreserved = cli->rtreserved;
 }
 
 /*
@@ -2465,6 +2952,20 @@ _("autofsck not supported without CRC support\n"));
 			usage();
 		}
 		cli->autofsck = FSPROP_AUTOFSCK_UNSET;
+
+		if (cli->sb_feat.metadir &&
+		    cli_opt_set(&mopts, M_METADIR)) {
+			fprintf(stderr,
+_("metadata directory not supported without CRC support\n"));
+			usage();
+		}
+		cli->sb_feat.metadir = false;
+
+		if (cli->sb_feat.qflags) {
+			fprintf(stderr,
+_("persistent quota flags not supported without CRC support\n"));
+			usage();
+		}
 	}
 
 	if (!cli->sb_feat.finobt) {
@@ -2476,20 +2977,95 @@ _("inode btree counters not supported without finobt support\n"));
 		cli->sb_feat.inobtcnt = false;
 	}
 
-	if (cli->xi->rt.name) {
-		if (cli->sb_feat.reflink && cli_opt_set(&mopts, M_REFLINK)) {
-			fprintf(stderr,
-_("reflink not supported with realtime devices\n"));
-			usage();
+	if (cli->sb_feat.zoned) {
+		if (!cli->sb_feat.metadir) {
+			if (cli_opt_set(&mopts, M_METADIR)) {
+				fprintf(stderr,
+_("zoned realtime device not supported without metadir support\n"));
+				usage();
+			}
+			cli->sb_feat.metadir = true;
 		}
-		cli->sb_feat.reflink = false;
+		if (cli->rtextsize) {
+			if (cli_opt_set(&ropts, R_EXTSIZE)) {
+				fprintf(stderr,
+_("rt extent size not supported on realtime devices with zoned mode\n"));
+				usage();
+			}
+			cli->rtextsize = 0;
+		}
+		if (cli->sb_feat.reflink) {
+			if (cli_opt_set(&mopts, M_REFLINK)) {
+				fprintf(stderr,
+_("reflink not supported on realtime devices with zoned mode specified\n"));
+				usage();
+			}
+			cli->sb_feat.reflink = false;
+		}
 
-		if (cli->sb_feat.rmapbt && cli_opt_set(&mopts, M_RMAPBT)) {
+		/*
+		 * Set the rtinherit by default for zoned file systems as they
+		 * usually use the data device purely as a metadata container.
+		 */
+		if (!cli_opt_set(&dopts, D_RTINHERIT))
+			cli->fsx.fsx_xflags |= FS_XFLAG_RTINHERIT;
+	} else {
+		if (cli->rtstart) {
 			fprintf(stderr,
-_("rmapbt not supported with realtime devices\n"));
+_("internal RT section only supported in zoned mode\n"));
 			usage();
 		}
-		cli->sb_feat.rmapbt = false;
+		if (cli->rtreserved) {
+			fprintf(stderr,
+_("reserved RT blocks only supported in zoned mode\n"));
+			usage();
+		}
+	}
+
+	if (cli->xi->rt.name || cfg->rtstart) {
+		if (cli->rtextsize && cli->sb_feat.reflink) {
+			if (cli_opt_set(&mopts, M_REFLINK)) {
+				fprintf(stderr,
+_("reflink not supported on realtime devices with rt extent size specified\n"));
+				usage();
+			}
+			cli->sb_feat.reflink = false;
+		}
+		if (cfg->blocksize < XFS_MIN_RTEXTSIZE && cli->sb_feat.reflink) {
+			if (cli_opt_set(&mopts, M_REFLINK)) {
+				fprintf(stderr,
+_("reflink not supported on realtime devices with blocksize %d < %d\n"),
+						cli->blocksize,
+						XFS_MIN_RTEXTSIZE);
+				usage();
+			}
+			cli->sb_feat.reflink = false;
+		}
+		if (!cli->sb_feat.metadir && cli->sb_feat.reflink) {
+			if (cli_opt_set(&mopts, M_REFLINK) &&
+			    cli_opt_set(&mopts, M_METADIR)) {
+				fprintf(stderr,
+_("reflink not supported on realtime devices without metadir feature\n"));
+				usage();
+			} else if (cli_opt_set(&mopts, M_REFLINK)) {
+				cli->sb_feat.metadir = true;
+			} else {
+				cli->sb_feat.reflink = false;
+			}
+		}
+
+		if (!cli->sb_feat.metadir && cli->sb_feat.rmapbt) {
+			if (cli_opt_set(&mopts, M_RMAPBT) &&
+			    cli_opt_set(&mopts, M_METADIR)) {
+				fprintf(stderr,
+_("rmapbt not supported on realtime devices without metadir feature\n"));
+				usage();
+			} else if (cli_opt_set(&mopts, M_RMAPBT)) {
+				cli->sb_feat.metadir = true;
+			} else {
+				cli->sb_feat.rmapbt = false;
+			}
+		}
 	}
 
 	if ((cli->fsx.fsx_xflags & FS_XFLAG_COWEXTSIZE) &&
@@ -2508,6 +3084,40 @@ _("cowextsize not supported without reflink support\n"));
 	if (cli->sb_feat.parent_pointers && !cli->sb_feat.exchrange &&
 	    !cli_opt_set(&iopts, I_EXCHANGE)) {
 		cli->sb_feat.exchrange = true;
+	}
+
+	/*
+	 * Persistent quota flags requires metadir support because older
+	 * kernels (or current kernels with old filesystems) will reset qflags
+	 * in the absence of any quota mount options.
+	 */
+	if (cli->sb_feat.qflags && !cli->sb_feat.metadir) {
+		if (cli_opt_set(&mopts, M_METADIR)) {
+			fprintf(stderr,
+_("persistent quota flags not supported without metadir support\n"));
+			usage();
+		}
+		cli->sb_feat.metadir = true;
+	}
+
+	/*
+	 * Exchange-range will be needed for space reorganization on filesystems
+	 * with realtime rmap or realtime reflink enabled, and there is no good
+	 * reason to ever disable it on a file system with new enough features.
+	 */
+	if (cli->sb_feat.metadir && !cli->sb_feat.exchrange) {
+		if (cli_opt_set(&iopts, I_EXCHANGE)) {
+			fprintf(stderr,
+_("metadir not supported without exchange-range support\n"));
+			usage();
+		}
+		cli->sb_feat.exchrange = true;
+	}
+
+	if (cli_opt_set(&iopts, I_MAX_ATOMIC_WRITE) && !cli->sb_feat.reflink) {
+		fprintf(stderr,
+_("max_atomic_write option not supported without reflink support\n"));
+		usage();
 	}
 
 	/*
@@ -2646,6 +3256,24 @@ validate_rtextsize(
 			usage();
 		}
 		cfg->rtextblocks = (xfs_extlen_t)(rtextbytes >> cfg->blocklog);
+	} else if (cli->sb_feat.reflink && cli->xi->rt.name) {
+		/*
+		 * reflink doesn't support rt extent size > 1FSB yet, so set
+		 * an extent size of 1FSB.  Make sure we still satisfy the
+		 * minimum rt extent size.
+		 */
+		if (cfg->blocksize < XFS_MIN_RTEXTSIZE) {
+			fprintf(stderr,
+		_("reflink not supported on rt volume with blocksize %d\n"),
+				cfg->blocksize);
+			usage();
+		}
+		cfg->rtextblocks = 1;
+	} else if (cli->sb_feat.zoned) {
+		/*
+		 * Zoned mode only supports a rtextsize of 1.
+		 */
+		cfg->rtextblocks = 1;
 	} else {
 		/*
 		 * If realtime extsize has not been specified by the user,
@@ -2677,6 +3305,12 @@ validate_rtextsize(
 		}
 	}
 	ASSERT(cfg->rtextblocks);
+
+	if (cli->sb_feat.reflink && cfg->rtblocks > 0 && cfg->rtextblocks > 1) {
+		fprintf(stderr,
+_("reflink not supported on realtime with extent sizes > 1\n"));
+		usage();
+	}
 }
 
 /* Validate the incoming extsize hint. */
@@ -2757,6 +3391,52 @@ _("illegal CoW extent size hint %lld, must be less than %u.\n"),
 				min(XFS_MAX_BMBT_EXTLEN, mp->m_sb.sb_agblocks / 2));
 		usage();
 	}
+
+	/*
+	 * If the value is to be passed on to realtime files, revalidate with
+	 * a realtime file so that we know the hint and flag that get passed on
+	 * to realtime files will be correct.
+	 */
+	if (!(cli->fsx.fsx_xflags & FS_XFLAG_RTINHERIT))
+		return;
+
+	fa = libxfs_inode_validate_cowextsize(mp, cli->fsx.fsx_cowextsize,
+			S_IFREG, XFS_DIFLAG_REALTIME, flags2);
+
+	if (fa) {
+		fprintf(stderr,
+_("illegal CoW extent size hint %lld, must be less than %u and a multiple of %u. %p\n"),
+				(long long)cli->fsx.fsx_cowextsize,
+				min(XFS_MAX_BMBT_EXTLEN, mp->m_sb.sb_agblocks / 2),
+				mp->m_sb.sb_rextsize, fa);
+		usage();
+	}
+}
+
+static void
+validate_device_awu(
+	struct mkfs_params	*cfg,
+	struct device_topology	*dt)
+{
+	/* Ignore hw atomic write capability if it can't do even 1 fsblock */
+	if (BBTOB(dt->awu_min) > cfg->blocksize ||
+	    BBTOB(dt->awu_max) < cfg->blocksize) {
+		dt->awu_min = 0;
+		dt->awu_max = 0;
+	}
+}
+
+static void
+validate_hw_atomic_writes(
+	struct mkfs_params	*cfg,
+	struct cli_params	*cli,
+	struct fs_topology	*ft)
+{
+	validate_device_awu(cfg, &ft->data);
+	if (cli->xi->log.name)
+		validate_device_awu(cfg, &ft->log);
+	if (cli->xi->rt.name)
+		validate_device_awu(cfg, &ft->rt);
 }
 
 /* Complain if this filesystem is not a supported configuration. */
@@ -2995,7 +3675,8 @@ _("log stripe unit (%d) must be a multiple of the block size (%d)\n"),
 	}
 
 	/*
-	 * check that log sunit is modulo fsblksize or default it to dsunit.
+	 * check that log sunit is modulo fsblksize; default it to dsunit for
+	 * an internal log; or the log device stripe unit if it's external.
 	 */
 	if (lsunit) {
 		/* convert from 512 byte blocks to fs blocks */
@@ -3004,12 +3685,16 @@ _("log stripe unit (%d) must be a multiple of the block size (%d)\n"),
 		   cfg->loginternal && cfg->dsunit) {
 		/* lsunit and dsunit now in fs blocks */
 		cfg->lsunit = cfg->dsunit;
+	} else if (cfg->sb_feat.log_version == 2 &&
+		   !cfg->loginternal) {
+		/* use the external log device properties */
+		cfg->lsunit = DTOBT(ft->log.sunit, cfg->blocklog);
 	}
 
 	if (cfg->sb_feat.log_version == 2 &&
 	    cfg->lsunit * cfg->blocksize > 256 * 1024) {
 		/* Warn only if specified on commandline */
-		if (cli->lsu || cli->lsunit != -1) {
+		if (cli->lsu || cli->lsunit) {
 			fprintf(stderr,
 _("log stripe unit (%d bytes) is too large (maximum is 256KiB)\n"
   "log stripe unit adjusted to 32KiB\n"),
@@ -3024,7 +3709,8 @@ _("log stripe unit (%d bytes) is too large (maximum is 256KiB)\n"
 static void
 open_devices(
 	struct mkfs_params	*cfg,
-	struct libxfs_init	*xi)
+	struct libxfs_init	*xi,
+	struct zone_topology	*zt)
 {
 	uint64_t		sector_mask;
 
@@ -3037,6 +3723,34 @@ open_devices(
 	if (!xi->data.dev) {
 		fprintf(stderr, _("no device name given in argument list\n"));
 		usage();
+	}
+
+	if (zt->data.nr_zones) {
+		zt->rt.zone_size = zt->data.zone_size;
+		zt->rt.zone_capacity = zt->data.zone_capacity;
+		zt->rt.nr_zones = zt->data.nr_zones - zt->data.nr_conv_zones;
+	} else if (cfg->sb_feat.zoned && !cfg->rtstart && !xi->rt.dev) {
+		/*
+		 * By default reserve at 1% of the total capacity (rounded up to
+		 * the next power of two) for metadata, but match the minimum we
+		 * enforce elsewhere. This matches what SMR HDDs provide.
+		 */
+		uint64_t rt_target_size = max((xi->data.size + 99) / 100,
+					      BTOBB(300 * 1024 * 1024));
+
+		cfg->rtstart = 1;
+		while (cfg->rtstart < rt_target_size)
+			cfg->rtstart <<= 1;
+	}
+
+	if (cfg->rtstart) {
+		if (cfg->rtstart >= xi->data.size) {
+			fprintf(stderr,
+ _("device size %lld too small for zoned allocator\n"), xi->data.size);
+			usage();
+		}
+		xi->rt.size = xi->data.size - cfg->rtstart;
+		xi->data.size = cfg->rtstart;
 	}
 
 	/*
@@ -3057,17 +3771,42 @@ open_devices(
 
 static void
 discard_devices(
+	struct mkfs_params	*cfg,
 	struct libxfs_init	*xi,
+	struct zone_topology	*zt,
 	int			quiet)
 {
 	/*
 	 * This function has to be called after libxfs has been initialized.
 	 */
 
-	if (!xi->data.isfile)
-		discard_blocks(xi->data.fd, xi->data.size, quiet);
-	if (xi->rt.dev && !xi->rt.isfile)
-		discard_blocks(xi->rt.fd, xi->rt.size, quiet);
+	if (!xi->data.isfile) {
+		uint64_t	nsectors = xi->data.size;
+
+		if (cfg->rtstart && zt->data.nr_zones) {
+			/*
+			 * Note that the zone reset here includes the LBA range
+			 * for the data device.
+			 *
+			 * This is because doing a single zone reset all on the
+			 * entire device (which the kernel automatically does
+			 * for us for a full device range) is a lot faster than
+			 * resetting each zone individually and resetting
+			 * the conventional zones used for the data device is a
+			 * no-op.
+			 */
+			reset_zones(cfg, xi->data.fd, 0,
+					cfg->rtstart + xi->rt.size, quiet);
+			nsectors -= cfg->rtstart;
+		}
+		discard_blocks(xi->data.fd, nsectors, quiet);
+	}
+	if (xi->rt.dev && !xi->rt.isfile) {
+		if (zt->rt.nr_zones)
+			reset_zones(cfg, xi->rt.fd, 0, xi->rt.size, quiet);
+		else
+			discard_blocks(xi->rt.fd, xi->rt.size, quiet);
+	}
 	if (xi->log.dev && xi->log.dev != xi->data.dev && !xi->log.isfile)
 		discard_blocks(xi->log.fd, xi->log.size, quiet);
 }
@@ -3186,11 +3925,12 @@ reported by the device (%u).\n"),
 static void
 validate_rtdev(
 	struct mkfs_params	*cfg,
-	struct cli_params	*cli)
+	struct cli_params	*cli,
+	struct zone_topology	*zt)
 {
 	struct libxfs_init	*xi = cli->xi;
 
-	if (!xi->rt.dev) {
+	if (!xi->rt.dev && !cfg->rtstart) {
 		if (cli->rtsize) {
 			fprintf(stderr,
 _("size specified for non-existent rt subvolume\n"));
@@ -3210,7 +3950,7 @@ _("size specified for non-existent rt subvolume\n"));
 	if (cli->rtsize) {
 		if (cfg->rtblocks > DTOBT(xi->rt.size, cfg->blocklog)) {
 			fprintf(stderr,
-_("size %s specified for rt subvolume is too large, maxi->um is %lld blocks\n"),
+_("size %s specified for rt subvolume is too large, maximum is %lld blocks\n"),
 				cli->rtsize,
 				(long long)DTOBT(xi->rt.size, cfg->blocklog));
 			usage();
@@ -3221,6 +3961,9 @@ _("size %s specified for rt subvolume is too large, maxi->um is %lld blocks\n"),
 reported by the device (%u).\n"),
 				cfg->sectorsize, xi->rt.bsize);
 		}
+	} else if (zt->rt.nr_zones) {
+		cfg->rtblocks = DTOBT(zt->rt.nr_zones * zt->rt.zone_capacity,
+				      cfg->blocklog);
 	} else {
 		/* grab volume size */
 		cfg->rtblocks = DTOBT(xi->rt.size, cfg->blocklog);
@@ -3232,6 +3975,11 @@ reported by the device (%u).\n"),
 _("cannot have an rt subvolume with zero extents\n"));
 		usage();
 	}
+
+	/*
+	 * Note for rtgroup file systems this will be overriden in
+	 * calculate_rtgroup_geometry.
+	 */
 	cfg->rtbmblocks = (xfs_extlen_t)howmany(cfg->rtextents,
 						NBBY * cfg->blocksize);
 }
@@ -3364,10 +4112,32 @@ _("agsize (%s) not a multiple of fs blk size (%d)\n"),
  */
 static void
 align_ag_geometry(
-	struct mkfs_params	*cfg)
+	struct mkfs_params	*cfg,
+	struct fs_topology	*ft)
 {
-	uint64_t	tmp_agsize;
-	int		dsunit = cfg->dsunit;
+	uint64_t		tmp_agsize;
+	int			dsunit = cfg->dsunit;
+
+	/*
+	 * We've already validated (or discarded) the hardware atomic write
+	 * geometry.  Try to align the agsize to the maximum atomic write unit
+	 * to give users maximum flexibility in choosing atomic write sizes.
+	 */
+	if (ft->data.awu_max > 0)
+		dsunit = max(DTOBT(ft->data.awu_max, cfg->blocklog),
+				dsunit);
+
+	/*
+	 * If the user gave us a maximum atomic write size that is less than
+	 * a whole AG, try to align the AG size to that value.
+	 */
+	if (cfg->max_atomic_write > 0) {
+		xfs_extlen_t	max_atomic_fsbs =
+			cfg->max_atomic_write >> cfg->blocklog;
+
+		if (max_atomic_fsbs < cfg->agsize)
+			dsunit = max(dsunit, max_atomic_fsbs);
+	}
 
 	if (!dsunit)
 		goto validate;
@@ -3423,7 +4193,8 @@ _("agsize rounded to %lld, sunit = %d\n"),
 				(long long)cfg->agsize, dsunit);
 	}
 
-	if ((cfg->agsize % cfg->dswidth) == 0 &&
+	if (cfg->dswidth > 0 &&
+	    (cfg->agsize % cfg->dswidth) == 0 &&
 	    cfg->dswidth != cfg->dsunit &&
 	    cfg->agcount > 1) {
 
@@ -3474,14 +4245,427 @@ validate:
 			     cfg->agsize, cfg->agcount);
 }
 
+static uint64_t
+calc_rgsize_extsize_nonpower(
+	struct mkfs_params	*cfg)
+{
+	uint64_t		try_rgsize, rgsize, rgcount;
+
+	/*
+	 * For non-power-of-two rt extent sizes, round the rtgroup size down to
+	 * the nearest extent.
+	 */
+	calc_default_rtgroup_geometry(cfg->blocklog, cfg->rtblocks, &rgsize,
+			&rgcount);
+	rgsize -= rgsize % cfg->rtextblocks;
+	rgsize = min(XFS_MAX_RGBLOCKS, rgsize);
+
+	/*
+	 * If we would be left with a too-small rtgroup, increase or decrease
+	 * the size of the group until we have a working geometry.
+	 */
+	for (try_rgsize = rgsize;
+	     try_rgsize <= XFS_MAX_RGBLOCKS - cfg->rtextblocks;
+	     try_rgsize += cfg->rtextblocks) {
+		if (cfg->rtblocks % try_rgsize >= (2 * cfg->rtextblocks))
+			return try_rgsize;
+	}
+	for (try_rgsize = rgsize;
+	     try_rgsize > (2 * cfg->rtextblocks);
+	     try_rgsize -= cfg->rtextblocks) {
+		if (cfg->rtblocks % try_rgsize >= (2 * cfg->rtextblocks))
+			return try_rgsize;
+	}
+
+	fprintf(stderr,
+_("realtime group size (%llu) not at all congruent with extent size (%llu)\n"),
+			(unsigned long long)rgsize,
+			(unsigned long long)cfg->rtextblocks);
+	usage();
+	return 0;
+}
+
+static uint64_t
+calc_rgsize_extsize_power(
+	struct mkfs_params	*cfg)
+{
+	uint64_t		try_rgsize, rgsize, rgcount;
+	unsigned int		rgsizelog;
+
+	/*
+	 * Find the rt group size that is both a power of two and yields at
+	 * least as many rt groups as the default geometry specified.
+	 */
+	calc_default_rtgroup_geometry(cfg->blocklog, cfg->rtblocks, &rgsize,
+			&rgcount);
+	rgsizelog = log2_rounddown(rgsize);
+	rgsize = min(XFS_MAX_RGBLOCKS, 1U << rgsizelog);
+
+	/*
+	 * If we would be left with a too-small rtgroup, increase or decrease
+	 * the size of the group by powers of 2 until we have a working
+	 * geometry.  If that doesn't work, try bumping by the extent size.
+	 */
+	for (try_rgsize = rgsize;
+	     try_rgsize <= XFS_MAX_RGBLOCKS - cfg->rtextblocks;
+	     try_rgsize <<= 2) {
+		if (cfg->rtblocks % try_rgsize >= (2 * cfg->rtextblocks))
+			return try_rgsize;
+	}
+	for (try_rgsize = rgsize;
+	     try_rgsize > (2 * cfg->rtextblocks);
+	     try_rgsize >>= 2) {
+		if (cfg->rtblocks % try_rgsize >= (2 * cfg->rtextblocks))
+			return try_rgsize;
+	}
+	for (try_rgsize = rgsize;
+	     try_rgsize <= XFS_MAX_RGBLOCKS - cfg->rtextblocks;
+	     try_rgsize += cfg->rtextblocks) {
+		if (cfg->rtblocks % try_rgsize >= (2 * cfg->rtextblocks))
+			return try_rgsize;
+	}
+	for (try_rgsize = rgsize;
+	     try_rgsize > (2 * cfg->rtextblocks);
+	     try_rgsize -= cfg->rtextblocks) {
+		if (cfg->rtblocks % try_rgsize >= (2 * cfg->rtextblocks))
+			return try_rgsize;
+	}
+
+	fprintf(stderr,
+_("realtime group size (%llu) not at all congruent with extent size (%llu)\n"),
+			(unsigned long long)rgsize,
+			(unsigned long long)cfg->rtextblocks);
+	usage();
+	return 0;
+}
+
+static bool
+rtdev_is_solidstate(
+	struct libxfs_init	*xi)
+{
+	unsigned short		rotational = 1;
+	int			error;
+
+	error = ioctl(xi->rt.fd, BLKROTATIONAL, &rotational);
+	if (error)
+		return false;
+
+	return rotational == 0;
+}
+
+static void
+calc_concurrency_rtgroup_geometry(
+	struct mkfs_params	*cfg,
+	struct cli_params	*cli,
+	struct libxfs_init	*xi)
+{
+	uint64_t		try_rgsize;
+	uint64_t		def_rgsize;
+	uint64_t		def_rgcount;
+	int			nr_threads = cli->rtvol_concurrency;
+	int			try_threads;
+
+	if (is_power_of_2(cfg->rtextblocks))
+		def_rgsize = calc_rgsize_extsize_power(cfg);
+	else
+		def_rgsize = calc_rgsize_extsize_nonpower(cfg);
+	def_rgcount = howmany(cfg->rtblocks, def_rgsize);
+	try_rgsize = def_rgsize;
+
+	/*
+	 * If the caller doesn't have a particular concurrency level in mind,
+	 * set it to the number of CPUs in the system.
+	 */
+	if (nr_threads < 0)
+		nr_threads = nr_cpus();
+
+	/*
+	 * Don't create fewer rtgroups than what we would create with the
+	 * default geometry calculation.
+	 */
+	if (!nr_threads || nr_threads < def_rgcount)
+		goto out;
+
+	/*
+	 * Let's try matching the number of rtgroups to the number of CPUs.  If
+	 * the proposed geometry results in rtgroups smaller than 4GB, reduce
+	 * the rtgroup count until we have 4GB rtgroups.  Don't let the thread
+	 * count go below the default geometry calculation.
+	 */
+	try_threads = nr_threads;
+	try_rgsize = cfg->rtblocks / try_threads;
+	if (try_rgsize < GIGABYTES(4, cfg->blocklog)) {
+		do {
+			try_threads--;
+			if (try_threads <= def_rgcount) {
+				try_rgsize = def_rgsize;
+				goto out;
+			}
+
+			try_rgsize = cfg->rtblocks / try_threads;
+		} while (try_rgsize < GIGABYTES(4, cfg->blocklog));
+		goto out;
+	}
+
+	/*
+	 * For large filesystems we try to ensure that the rtgroup count is a
+	 * multiple of the desired thread count.  Specifically, if the proposed
+	 * rtgroup size is larger than both the maximum rtgroup size and the
+	 * rtgroup size we would have gotten with the defaults, add the thread
+	 * count to the rtgroup count until we get an rtgroup size below both
+	 * of those factors.
+	 */
+	while (try_rgsize > XFS_MAX_RGBLOCKS && try_rgsize > def_rgsize) {
+		try_threads += nr_threads;
+		try_rgsize = cfg->dblocks / try_threads;
+	}
+
+out:
+	cfg->rgsize = try_rgsize;
+	cfg->rgcount = howmany(cfg->rtblocks, cfg->rgsize);
+}
+
+static void
+validate_rtgroup_geometry(
+	struct mkfs_params	*cfg)
+{
+	if (cfg->rgsize > XFS_MAX_RGBLOCKS) {
+		fprintf(stderr,
+_("realtime group size (%llu) must be less than the maximum (%u)\n"),
+				(unsigned long long)cfg->rgsize,
+				XFS_MAX_RGBLOCKS);
+		usage();
+	}
+
+	if (cfg->rgsize % cfg->rtextblocks != 0) {
+		fprintf(stderr,
+_("realtime group size (%llu) not a multiple of rt extent size (%llu)\n"),
+				(unsigned long long)cfg->rgsize,
+				(unsigned long long)cfg->rtextblocks);
+		usage();
+	}
+
+	if (cfg->rgsize <= cfg->rtextblocks) {
+		fprintf(stderr,
+_("realtime group size (%llu) must be at least two realtime extents\n"),
+				(unsigned long long)cfg->rgsize);
+		usage();
+	}
+
+	if (cfg->rgcount > XFS_MAX_RGNUMBER) {
+		fprintf(stderr,
+_("realtime group count (%llu) must be less than the maximum (%u)\n"),
+				(unsigned long long)cfg->rgcount,
+				XFS_MAX_RGNUMBER);
+		usage();
+	}
+}
+
+static void
+calculate_rtgroup_geometry(
+	struct mkfs_params	*cfg,
+	struct cli_params	*cli,
+	struct libxfs_init	*xi)
+{
+	if (!cli->sb_feat.metadir) {
+		cfg->rgcount = 0;
+		cfg->rgsize = 0;
+		return;
+	}
+
+	if (cli->rgsize) {	/* User-specified rtgroup size */
+		cfg->rgsize = getnum(cli->rgsize, &ropts, R_RGSIZE);
+
+		/*
+		 * Check specified agsize is a multiple of blocksize.
+		 */
+		if (cfg->rgsize % cfg->blocksize) {
+			fprintf(stderr,
+_("rgsize (%s) not a multiple of fs blk size (%d)\n"),
+				cli->rgsize, cfg->blocksize);
+			usage();
+		}
+		cfg->rgsize /= cfg->blocksize;
+		cfg->rgcount = cfg->rtblocks / cfg->rgsize +
+				(cfg->rtblocks % cfg->rgsize != 0);
+
+	} else if (cli->rgcount) {	/* User-specified rtgroup count */
+		cfg->rgcount = cli->rgcount;
+		cfg->rgsize = cfg->rtblocks / cfg->rgcount +
+				(cfg->rtblocks % cfg->rgcount != 0);
+	} else if (cfg->rtblocks == 0) {
+		/*
+		 * If nobody specified a realtime device or the rtgroup size,
+		 * try 1TB, rounded down to the nearest rt extent.
+		 */
+		cfg->rgsize = TERABYTES(1, cfg->blocklog);
+		cfg->rgsize -= cfg->rgsize % cfg->rtextblocks;
+		cfg->rgcount = 0;
+	} else if (cfg->rtblocks < cfg->rtextblocks * 2) {
+		/* too small even for a single group */
+		cfg->rgsize = cfg->rtblocks;
+		cfg->rgcount = 0;
+	} else if (cli->rtvol_concurrency > 0 ||
+		   (cli->rtvol_concurrency == -1 && rtdev_is_solidstate(xi))) {
+		calc_concurrency_rtgroup_geometry(cfg, cli, xi);
+	} else if (is_power_of_2(cfg->rtextblocks)) {
+		cfg->rgsize = calc_rgsize_extsize_power(cfg);
+		cfg->rgcount = cfg->rtblocks / cfg->rgsize +
+				(cfg->rtblocks % cfg->rgsize != 0);
+	} else {
+		cfg->rgsize = calc_rgsize_extsize_nonpower(cfg);
+		cfg->rgcount = cfg->rtblocks / cfg->rgsize +
+				(cfg->rtblocks % cfg->rgsize != 0);
+	}
+
+	validate_rtgroup_geometry(cfg);
+
+	if (cfg->rtextents)
+		cfg->rtbmblocks = howmany(cfg->rgsize / cfg->rtextblocks,
+			NBBY * (cfg->blocksize - sizeof(struct xfs_rtbuf_blkinfo)));
+}
+
+/*
+ * If we're creating a zoned filesystem and the user specified a size, add
+ * enough over-provisioning to be able to back the requested amount of
+ * writable space.
+ */
+static void
+adjust_nr_zones(
+	struct mkfs_params	*cfg,
+	struct cli_params	*cli,
+	struct libxfs_init	*xi,
+	struct zone_topology	*zt)
+{
+	uint64_t		new_rtblocks, slack;
+	unsigned int		max_zones;
+
+	if (zt->rt.nr_zones)
+		max_zones = zt->rt.nr_zones;
+	else
+		max_zones = DTOBT(xi->rt.size, cfg->blocklog) / cfg->rgsize;
+
+	if (!cli->rgcount)
+		cfg->rgcount += XFS_RESERVED_ZONES;
+	if (cfg->rgcount > max_zones) {
+		cfg->rgcount = max_zones;
+		fprintf(stderr,
+_("Warning: not enough zones for backing requested rt size due to\n"
+  "over-provisioning needs, writable size will be less than %s\n"),
+			cli->rtsize);
+	}
+	new_rtblocks = (cfg->rgcount * cfg->rgsize);
+	slack = (new_rtblocks - cfg->rtblocks) % cfg->rgsize;
+
+	cfg->rtblocks = new_rtblocks;
+	cfg->rtextents = cfg->rtblocks / cfg->rtextblocks;
+
+	/*
+	 * Add the slack to the end of the last zone to the reserved blocks.
+	 * This ensures the visible user capacity is exactly the one that the
+	 * user asked for.
+	 */
+	cfg->rtreserved += (slack * cfg->blocksize);
+}
+
+static void
+calculate_zone_geometry(
+	struct mkfs_params	*cfg,
+	struct cli_params	*cli,
+	struct libxfs_init	*xi,
+	struct zone_topology	*zt)
+{
+	if (cfg->rtblocks == 0) {
+		fprintf(stderr,
+_("empty zoned realtime device not supported.\n"));
+		usage();
+	}
+
+	if (zt->rt.nr_zones) {
+		/* The RT device has hardware zones */
+		cfg->rgsize = zt->rt.zone_capacity * 512;
+
+		if (cfg->rgsize % cfg->blocksize) {
+			fprintf(stderr,
+_("rgsize (%s) not a multiple of fs blk size (%d)\n"),
+				cli->rgsize, cfg->blocksize);
+			usage();
+		}
+		if (cli->rgsize) {
+			fprintf(stderr,
+_("rgsize (%s) may not be specified when the rt device is zoned\n"),
+				cli->rgsize);
+			usage();
+		}
+
+		cfg->rgsize /= cfg->blocksize;
+		cfg->rgcount = howmany(cfg->rtblocks, cfg->rgsize);
+
+		if (cli->rgcount > cfg->rgcount) {
+			fprintf(stderr,
+_("rgcount (%llu) is larger than hardware zone count (%llu)\n"),
+					(unsigned long long)cli->rgcount,
+					(unsigned long long)cfg->rgcount);
+			usage();
+		} else if (cli->rgcount && cli->rgcount < cfg->rgcount) {
+			/* constrain the rt device to the given rgcount */
+			cfg->rgcount = cli->rgcount;
+		}
+	} else {
+		/* No hardware zones */
+		if (cli->rgsize) {
+			/* User-specified rtgroup size */
+			cfg->rgsize = getnum(cli->rgsize, &ropts, R_RGSIZE);
+
+			/* Check specified agsize is a multiple of blocksize. */
+			if (cfg->rgsize % cfg->blocksize) {
+				fprintf(stderr,
+_("rgsize (%s) not a multiple of fs blk size (%d)\n"),
+					cli->rgsize, cfg->blocksize);
+				usage();
+			}
+			cfg->rgsize /= cfg->blocksize;
+			cfg->rgcount = cfg->rtblocks / cfg->rgsize +
+					(cfg->rtblocks % cfg->rgsize != 0);
+		} else if (cli->rgcount) {
+			/* User-specified rtgroup count */
+			cfg->rgcount = cli->rgcount;
+			cfg->rgsize = cfg->rtblocks / cfg->rgcount +
+					(cfg->rtblocks % cfg->rgcount != 0);
+		} else {
+			/* 256MB zones just like typical SMR HDDs */
+			cfg->rgsize = MEGABYTES(256, cfg->blocklog);
+			cfg->rgcount = cfg->rtblocks / cfg->rgsize +
+					(cfg->rtblocks % cfg->rgsize != 0);
+		}
+	}
+
+	if (cli->rtsize || cli->rgcount)
+		adjust_nr_zones(cfg, cli, xi, zt);
+
+	if (cfg->rgcount < XFS_MIN_ZONES)  {
+		fprintf(stderr,
+_("realtime group count (%llu) must be greater than the minimum zone count (%u)\n"),
+				(unsigned long long)cfg->rgcount,
+				XFS_MIN_ZONES);
+		usage();
+	}
+
+	validate_rtgroup_geometry(cfg);
+
+	/* Zoned RT devices don't use the rtbitmap, and have no bitmap blocks */
+	cfg->rtbmblocks = 0;
+}
+
 static void
 calculate_imaxpct(
 	struct mkfs_params	*cfg,
 	struct cli_params	*cli)
 {
-	cfg->imaxpct = cli->imaxpct;
-	if (cfg->imaxpct)
+	if (cli->imaxpct >= 0) {
+		cfg->imaxpct = cli->imaxpct;
 		return;
+	}
 
 	/*
 	 * This returns the % of the disk space that is used for
@@ -3558,6 +4742,9 @@ sb_set_features(
 	if (fp->dirftype && !fp->crcs_enabled)
 		sbp->sb_features2 |= XFS_SB_VERSION2_FTYPE;
 
+	if (fp->qflags)
+		sbp->sb_versionnum |= XFS_SB_VERSION_QUOTABIT;
+
 	/* update whether extended features are in use */
 	if (sbp->sb_features2 != 0)
 		sbp->sb_versionnum |= XFS_SB_VERSION_MOREBITSBIT;
@@ -3568,7 +4755,16 @@ sb_set_features(
 	 * the sb_bad_features2 field. To avoid older kernels mounting
 	 * filesystems they shouldn't, set both field to the same value.
 	 */
-	sbp->sb_bad_features2 = sbp->sb_features2;
+	if (!fp->metadir)
+		sbp->sb_bad_features2 = sbp->sb_features2;
+
+	/*
+	 * This will be overriden later for real rtgroup file systems.  For
+	 * !rtgroups filesystems, we pretend that there's one huge group, just
+	 * like __xfs_sb_from_disk does.
+	 */
+	sbp->sb_rgcount = 1;
+	sbp->sb_rgextents = 0;
 
 	if (!fp->crcs_enabled)
 		return;
@@ -3618,6 +4814,21 @@ sb_set_features(
 		 */
 		sbp->sb_versionnum |= XFS_SB_VERSION_ATTRBIT;
 	}
+	if (fp->metadir) {
+		sbp->sb_features_incompat |= XFS_SB_FEAT_INCOMPAT_METADIR;
+		sbp->sb_rgcount = cfg->rgcount;
+		sbp->sb_rgextents = cfg->rgsize / cfg->rtextblocks;
+		sbp->sb_rgblklog = libxfs_compute_rgblklog(sbp->sb_rgextents,
+							   cfg->rtextblocks);
+	}
+
+	if (fp->zoned) {
+		sbp->sb_features_incompat |= XFS_SB_FEAT_INCOMPAT_ZONED;
+		sbp->sb_rtstart = (cfg->rtstart * 512) / cfg->blocksize;
+		sbp->sb_rtreserved = cfg->rtreserved / cfg->blocksize;
+	}
+	if (fp->zone_gaps)
+		sbp->sb_features_incompat |= XFS_SB_FEAT_INCOMPAT_ZONE_GAPS;
 }
 
 /*
@@ -3807,6 +5018,140 @@ out:
 	return logblocks;
 }
 
+#define MAX_RW_COUNT (INT_MAX & ~(getpagesize() - 1))
+
+/* Maximum atomic write IO size that the kernel allows. */
+static inline xfs_extlen_t calc_atomic_write_max(struct mkfs_params *cfg)
+{
+	return rounddown_pow_of_two(MAX_RW_COUNT >> cfg->blocklog);
+}
+
+static inline unsigned int max_pow_of_two_factor(const unsigned int nr)
+{
+	return 1 << (ffs(nr) - 1);
+}
+
+/*
+ * If the data device advertises atomic write support, limit the size of data
+ * device atomic writes to the greatest power-of-two factor of the AG size so
+ * that every atomic write unit aligns with the start of every AG.  This is
+ * required so that the per-AG allocations for an atomic write will always be
+ * aligned compatibly with the alignment requirements of the storage.
+ *
+ * If the data device doesn't advertise atomic writes, then there are no
+ * alignment restrictions and the largest out-of-place write we can do
+ * ourselves is the number of blocks that user files can allocate from any AG.
+ */
+static inline xfs_extlen_t
+calc_perag_awu_max(
+	struct mkfs_params	*cfg,
+	struct fs_topology	*ft)
+{
+	if (ft->data.awu_min > 0)
+		return max_pow_of_two_factor(cfg->agsize);
+	return cfg->agsize;
+}
+
+/*
+ * Reflink on the realtime device requires rtgroups, and atomic writes require
+ * reflink.
+ *
+ * If the realtime device advertises atomic write support, limit the size of
+ * data device atomic writes to the greatest power-of-two factor of the rtgroup
+ * size so that every atomic write unit aligns with the start of every rtgroup.
+ * This is required so that the per-rtgroup allocations for an atomic write
+ * will always be aligned compatibly with the alignment requirements of the
+ * storage.
+ *
+ * If the rt device doesn't advertise atomic writes, then there are no
+ * alignment restrictions and the largest out-of-place write we can do
+ * ourselves is the number of blocks that user files can allocate from any
+ * rtgroup.
+ */
+static inline xfs_extlen_t
+calc_rtgroup_awu_max(
+	struct mkfs_params	*cfg,
+	struct fs_topology	*ft)
+{
+	if (ft->rt.awu_min > 0)
+		return max_pow_of_two_factor(cfg->rgsize);
+	return cfg->rgsize;
+}
+
+/*
+ * Validate the maximum atomic out of place write size passed in by the user.
+ */
+static void
+validate_max_atomic_write(
+	struct mkfs_params	*cfg,
+	struct cli_params	*cli,
+	struct fs_topology	*ft,
+	struct xfs_mount	*mp)
+{
+	const xfs_extlen_t	max_write = calc_atomic_write_max(cfg);
+	xfs_filblks_t		max_atomic_fsbcount;
+
+	cfg->max_atomic_write = getnum(cli->max_atomic_write, &iopts,
+			I_MAX_ATOMIC_WRITE);
+	max_atomic_fsbcount = cfg->max_atomic_write >> cfg->blocklog;
+
+	/* generic_atomic_write_valid enforces power of two length */
+	if (!is_power_of_2(cfg->max_atomic_write)) {
+		fprintf(stderr,
+ _("Max atomic write size of %llu bytes is not a power of 2\n"),
+			(unsigned long long)cfg->max_atomic_write);
+		exit(1);
+	}
+
+	if (cfg->max_atomic_write % cfg->blocksize) {
+		fprintf(stderr,
+ _("Max atomic write size of %llu bytes not aligned with fsblock.\n"),
+			(unsigned long long)cfg->max_atomic_write);
+		exit(1);
+	}
+
+	if (max_atomic_fsbcount > max_write) {
+		fprintf(stderr,
+ _("Max atomic write size of %lluk cannot be larger than max write size %lluk.\n"),
+			(unsigned long long)cfg->max_atomic_write >> 10,
+			(unsigned long long)max_write << (cfg->blocklog - 10));
+		exit(1);
+	}
+}
+
+/*
+ * Validate the maximum atomic out of place write size passed in by the user
+ * actually works with the allocation groups sizes.
+ */
+static void
+validate_max_atomic_write_ags(
+	struct mkfs_params	*cfg,
+	struct fs_topology	*ft,
+	struct xfs_mount	*mp)
+{
+	const xfs_extlen_t	max_group = max(cfg->agsize, cfg->rgsize);
+	const xfs_extlen_t	max_group_write =
+		max(calc_perag_awu_max(cfg, ft), calc_rtgroup_awu_max(cfg, ft));
+	xfs_filblks_t		max_atomic_fsbcount =
+		XFS_B_TO_FSBT(mp, cfg->max_atomic_write);
+
+	if (max_atomic_fsbcount > max_group) {
+		fprintf(stderr,
+ _("Max atomic write size of %lluk cannot be larger than allocation group size %lluk.\n"),
+			(unsigned long long)cfg->max_atomic_write >> 10,
+			(unsigned long long)XFS_FSB_TO_B(mp, max_group) >> 10);
+		exit(1);
+	}
+
+	if (max_atomic_fsbcount > max_group_write) {
+		fprintf(stderr,
+ _("Max atomic write size of %lluk cannot be larger than max allocation group write size %lluk.\n"),
+			(unsigned long long)cfg->max_atomic_write >> 10,
+			(unsigned long long)XFS_FSB_TO_B(mp, max_group_write) >> 10);
+		exit(1);
+	}
+}
+
 static void
 calculate_log_size(
 	struct mkfs_params	*cfg,
@@ -3831,6 +5176,22 @@ calculate_log_size(
 
 		libxfs_log_get_max_trans_res(&mount, &res);
 		max_tx_bytes = res.tr_logres * res.tr_logcount;
+	}
+	if (cfg->max_atomic_write > 0) {
+		unsigned int	dontcare;
+		xfs_extlen_t	atomic_min_logblocks =
+			libxfs_calc_atomic_write_log_geometry(&mount,
+					cfg->max_atomic_write >> cfg->blocklog,
+					&dontcare);
+
+		if (!atomic_min_logblocks) {
+			fprintf(stderr,
+ _("atomic write size %lluk is too big for the log to handle.\n"),
+				(unsigned long long)cfg->max_atomic_write >> 10);
+			exit(1);
+		}
+
+		min_logblocks = max(min_logblocks, atomic_min_logblocks);
 	}
 	libxfs_umount(&mount);
 
@@ -4011,6 +5372,7 @@ start_superblock_setup(
 	sbp->sb_rblocks = cfg->rtblocks;
 	sbp->sb_rextsize = cfg->rtextblocks;
 	mp->m_features |= libxfs_sb_version_to_features(sbp);
+	libxfs_sb_mount_rextsize(mp, sbp);
 }
 
 static void
@@ -4053,6 +5415,7 @@ finish_superblock_setup(
 	platform_uuid_copy(&sbp->sb_meta_uuid, &cfg->uuid);
 	sbp->sb_logstart = cfg->logstart;
 	sbp->sb_rootino = sbp->sb_rbmino = sbp->sb_rsumino = NULLFSINO;
+	sbp->sb_metadirino = NULLFSINO;
 	sbp->sb_agcount = (xfs_agnumber_t)cfg->agcount;
 	sbp->sb_rbmblocks = cfg->rtbmblocks;
 	sbp->sb_logblocks = (xfs_extlen_t)cfg->logblocks;
@@ -4066,11 +5429,11 @@ finish_superblock_setup(
 			   (cfg->loginternal ? cfg->logblocks : 0);
 	sbp->sb_frextents = 0;	/* will do a free later */
 	sbp->sb_uquotino = sbp->sb_gquotino = sbp->sb_pquotino = 0;
-	sbp->sb_qflags = 0;
+	sbp->sb_qflags = cfg->sb_feat.qflags;
 	sbp->sb_unit = cfg->dsunit;
 	sbp->sb_width = cfg->dswidth;
 	mp->m_features |= libxfs_sb_version_to_features(sbp);
-
+	libxfs_sb_mount_rextsize(mp, sbp);
 }
 
 /* Prepare an uncached buffer, ready to write something out. */
@@ -4083,7 +5446,7 @@ alloc_write_buf(
 	struct xfs_buf		*bp;
 	int			error;
 
-	error = -libxfs_buf_get_uncached(btp, bblen, 0, &bp);
+	error = -libxfs_buf_get_uncached(btp, bblen, &bp);
 	if (error) {
 		fprintf(stderr, _("Could not get memory for buffer, err=%d\n"),
 				error);
@@ -4178,9 +5541,11 @@ prepare_devices(
 			 (xfs_extlen_t)XFS_FSB_TO_BB(mp, cfg->logblocks),
 			 &sbp->sb_uuid, cfg->sb_feat.log_version,
 			 lsunit, XLOG_FMT, XLOG_INIT_CYCLE, false);
-
 	/* finally, check we can write the last block in the realtime area */
-	if (mp->m_rtdev_targp->bt_bdev && cfg->rtblocks > 0) {
+	if (mp->m_rtdev_targp->bt_bdev &&
+	    mp->m_rtdev_targp != mp->m_ddev_targp &&
+	    cfg->rtblocks > 0 &&
+	    !xfs_has_zoned(mp)) {
 		buf = alloc_write_buf(mp->m_rtdev_targp,
 				XFS_FSB_TO_BB(mp, cfg->rtblocks - 1LL),
 				BTOBB(cfg->blocksize));
@@ -4279,6 +5644,8 @@ rewrite_secondary_superblocks(
 	}
 	dsb = buf->b_addr;
 	dsb->sb_rootino = cpu_to_be64(mp->m_sb.sb_rootino);
+	if (xfs_has_metadir(mp))
+		dsb->sb_metadirino = cpu_to_be64(mp->m_sb.sb_metadirino);
 	libxfs_buf_mark_dirty(buf);
 	libxfs_buf_relse(buf);
 
@@ -4297,6 +5664,8 @@ rewrite_secondary_superblocks(
 	}
 	dsb = buf->b_addr;
 	dsb->sb_rootino = cpu_to_be64(mp->m_sb.sb_rootino);
+	if (xfs_has_metadir(mp))
+		dsb->sb_metadirino = cpu_to_be64(mp->m_sb.sb_metadirino);
 	libxfs_buf_mark_dirty(buf);
 	libxfs_buf_relse(buf);
 }
@@ -4448,6 +5817,97 @@ set_autofsck(
 	libxfs_irele(args.dp);
 }
 
+/* Write the realtime superblock */
+static void
+write_rtsb(
+	struct xfs_mount	*mp)
+{
+	struct xfs_buf		*rtsb_bp;
+	struct xfs_buf		*sb_bp = libxfs_getsb(mp);
+	int			error;
+
+	if (!sb_bp) {
+		fprintf(stderr,
+  _("%s: couldn't grab primary superblock buffer\n"), progname);
+		exit(1);
+	}
+
+	error = -libxfs_buf_get_uncached(mp->m_rtdev_targp,
+				XFS_FSB_TO_BB(mp, 1), &rtsb_bp);
+	if (error) {
+		fprintf(stderr,
+ _("%s: couldn't grab realtime superblock buffer\n"), progname);
+			exit(1);
+	}
+
+	rtsb_bp->b_maps[0].bm_bn = XFS_RTSB_DADDR;
+	rtsb_bp->b_ops = &xfs_rtsb_buf_ops;
+
+	libxfs_update_rtsb(rtsb_bp, sb_bp);
+	libxfs_buf_mark_dirty(rtsb_bp);
+	libxfs_buf_relse(rtsb_bp);
+	libxfs_buf_relse(sb_bp);
+}
+
+static inline void
+prealloc_fail(
+	struct xfs_mount	*mp,
+	int			error,
+	xfs_filblks_t		ask,
+	const char		*tag)
+{
+	if (error == ENOSPC)
+		fprintf(stderr,
+	_("%s: cannot handle expansion of %s; need %llu free blocks, have %llu\n"),
+				progname, tag, (unsigned long long)ask,
+				(unsigned long long)mp->m_sb.sb_fdblocks);
+	else
+		fprintf(stderr,
+	_("%s: error %d while checking free space for %s\n"),
+				progname, error, tag);
+	exit(1);
+}
+
+/*
+ * Make sure there's enough space on the data device to handle realtime
+ * metadata btree expansions.
+ */
+static void
+check_rt_meta_prealloc(
+	struct xfs_mount	*mp)
+{
+	struct xfs_perag	*pag = NULL;
+	int			error;
+
+	/*
+	 * First create all the per-AG reservations, since they take from the
+	 * free block count.  Each AG should start with enough free space for
+	 * the per-AG reservation.
+	 */
+	mp->m_finobt_nores = false;
+
+	while ((pag = xfs_perag_next(mp, pag))) {
+		error = -libxfs_ag_resv_init(pag, NULL);
+		if (error && error != ENOSPC) {
+			fprintf(stderr,
+	_("%s: error %d while checking AG free space for realtime metadata\n"),
+					progname, error);
+			exit(1);
+		}
+	}
+
+	error = -libxfs_metafile_resv_init(mp);
+	if (error)
+		prealloc_fail(mp, error, 0, _("metadata files"));
+
+	libxfs_metafile_resv_free(mp);
+
+	while ((pag = xfs_perag_next(mp, pag)))
+		libxfs_ag_resv_free(pag);
+
+	mp->m_finobt_nores = false;
+}
+
 int
 main(
 	int			argc,
@@ -4460,7 +5920,7 @@ main(
 	int			discard = 1;
 	int			force_overwrite = 0;
 	int			quiet = 0;
-	char			*protostring = NULL;
+	struct proto_source	protosource;
 	int			worst_freelist = 0;
 
 	struct libxfs_init	xi = {
@@ -4477,7 +5937,9 @@ main(
 		.is_supported	= 1,
 		.data_concurrency = -1, /* auto detect non-mechanical storage */
 		.log_concurrency = -1, /* auto detect non-mechanical ddev */
+		.rtvol_concurrency = -1, /* auto detect non-mechanical rtdev */
 		.autofsck = FSPROP_AUTOFSCK_UNSET,
+		.imaxpct = -1, /* set sb_imax_pct automatically */
 	};
 	struct mkfs_params	cfg = {};
 
@@ -4523,7 +5985,7 @@ main(
 			 */
 		},
 	};
-
+	struct zone_topology zt = {};
 	struct list_head	buffer_list;
 	int			error;
 
@@ -4608,8 +6070,6 @@ main(
 	 */
 	cfgfile_parse(&cli);
 
-	protostring = setup_proto(cli.protofile);
-
 	/*
 	 * Extract as much of the valid config as we can from the CLI input
 	 * before opening the libxfs devices.
@@ -4625,6 +6085,7 @@ main(
 	sectorsize = cfg.sectorsize;
 
 	validate_log_sectorsize(&cfg, &cli, &dft, &ft);
+	validate_zoned(&cfg, &cli, &dft, &zt);
 	validate_sb_features(&cfg, &cli);
 
 	/*
@@ -4645,16 +6106,24 @@ main(
 	cfg.rtblocks = calc_dev_size(cli.rtsize, &cfg, &ropts, R_SIZE, "rt");
 
 	validate_rtextsize(&cfg, &cli, &ft);
+	validate_hw_atomic_writes(&cfg, &cli, &ft);
 
 	/*
 	 * Open and validate the device configurations
 	 */
-	open_devices(&cfg, &xi);
+	open_devices(&cfg, &xi, &zt);
 	validate_overwrite(xi.data.name, force_overwrite);
 	validate_datadev(&cfg, &cli);
 	validate_logdev(&cfg, &cli);
-	validate_rtdev(&cfg, &cli);
+	validate_rtdev(&cfg, &cli, &zt);
 	calc_stripe_factors(&cfg, &cli, &ft);
+
+	/*
+	 * Now that we have basic geometry set up, we can validate the CLI
+	 * max atomic write parameter.
+	 */
+	if (cli.max_atomic_write)
+		validate_max_atomic_write(&cfg, &cli, &ft, mp);
 
 	/*
 	 * At this point when know exactly what size all the devices are,
@@ -4663,7 +6132,11 @@ main(
 	 * aligns to device geometry correctly.
 	 */
 	calculate_initial_ag_geometry(&cfg, &cli, &xi);
-	align_ag_geometry(&cfg);
+	align_ag_geometry(&cfg, &ft);
+	if (cfg.sb_feat.zoned)
+		calculate_zone_geometry(&cfg, &cli, &xi, &zt);
+	else
+		calculate_rtgroup_geometry(&cfg, &cli, &xi);
 
 	calculate_imaxpct(&cfg, &cli);
 
@@ -4674,6 +6147,14 @@ main(
 	 */
 	start_superblock_setup(&cfg, mp, sbp);
 	initialise_mount(mp, sbp);
+
+	/*
+	 * Now that we have computed the allocation group geometry, we can
+	 * continue validating the maximum software atomic write parameter, if
+	 * one was given.
+	 */
+	if (cfg.max_atomic_write)
+		validate_max_atomic_write_ags(&cfg, &ft, mp);
 
 	/*
 	 * With the mount set up, we can finally calculate the log size
@@ -4716,8 +6197,13 @@ main(
 	/*
 	 * All values have been validated, discard the old device layout.
 	 */
+	if (cli.sb_feat.zoned && !discard) {
+		fprintf(stderr,
+ _("-K not support for zoned file systems.\n"));
+		return 1;
+	}
 	if (discard && !dry_run)
-		discard_devices(&xi, quiet);
+		discard_devices(&cfg, &xi, &zt, quiet);
 
 	/*
 	 * we need the libxfs buffer cache from here on in.
@@ -4764,6 +6250,9 @@ main(
 		exit(1);
 	}
 
+	if (xfs_has_rtsb(mp) && cfg.rtblocks > 0)
+		write_rtsb(mp);
+
 	/*
 	 * Initialise the freespace freelists (i.e. AGFLs) in each AG.
 	 */
@@ -4773,12 +6262,19 @@ main(
 	/*
 	 * Allocate the root inode and anything else in the proto file.
 	 */
-	parse_proto(mp, &cli.fsx, &protostring, cli.proto_slashes_are_spaces);
+	protosource = setup_proto(cli.protofile);
+	parse_proto(mp, &cli.fsx,
+			&protosource,
+			cli.proto_slashes_are_spaces,
+			cli.proto_atime);
 
 	/*
 	 * Protect ourselves against possible stupidity
 	 */
 	check_root_ino(mp);
+
+	/* Make sure we can handle space preallocations of rt metadata btrees */
+	check_rt_meta_prealloc(mp);
 
 	/*
 	 * Re-write multiple secondary superblocks with rootinode field set

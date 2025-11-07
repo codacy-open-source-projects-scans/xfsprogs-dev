@@ -21,7 +21,9 @@
 #include "xfs_trans.h"
 #include "xfs_rmap_btree.h"
 #include "xfs_refcount_btree.h"
+#include "xfs_metafile.h"
 #include "libfrog/platform.h"
+#include "libfrog/util.h"
 #include "libxfs/xfile.h"
 #include "libxfs/buf_mem.h"
 
@@ -31,6 +33,7 @@
 #include "xfs_ondisk.h"
 
 #include "libxfs.h"		/* for now */
+#include "xfs_rtgroup.h"
 
 #ifndef HAVE_LIBURCU_ATOMIC64
 pthread_mutex_t	atomic64_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -43,6 +46,8 @@ int libxfs_bhash_size;		/* #buckets in bcache */
 int	use_xfs_buf_lock;	/* global flag: use xfs_buf locks for MT */
 
 static int nextfakedev = -1;	/* device number to give to next fake device */
+
+unsigned int PAGE_SHIFT;
 
 /*
  * Checks whether a given device has a mounted, writable
@@ -246,7 +251,7 @@ libxfs_close_devices(
 		libxfs_device_close(&li->data);
 	if (li->log.dev && li->log.dev != li->data.dev)
 		libxfs_device_close(&li->log);
-	if (li->rt.dev)
+	if (li->rt.dev && li->rt.dev != li->data.dev)
 		libxfs_device_close(&li->rt);
 }
 
@@ -257,6 +262,8 @@ libxfs_close_devices(
 int
 libxfs_init(struct libxfs_init *a)
 {
+	if (!PAGE_SHIFT)
+		PAGE_SHIFT = log2_roundup(PAGE_SIZE);
 	xfs_check_ondisk_structs();
 	xmbuf_libinit();
 	rcu_init();
@@ -293,22 +300,14 @@ rtmount_init(
 {
 	struct xfs_buf	*bp;	/* buffer for last block of subvolume */
 	xfs_daddr_t	d;	/* address of last block of subvolume */
-	unsigned int	rsumblocks;
 	int		error;
 
 	if (mp->m_sb.sb_rblocks == 0)
 		return 0;
 
-	if (xfs_has_reflink(mp)) {
+	if (xfs_has_reflink(mp) && mp->m_sb.sb_rextsize > 1) {
 		fprintf(stderr,
-	_("%s: Reflink not compatible with realtime device. Please try a newer xfsprogs.\n"),
-				progname);
-		return -1;
-	}
-
-	if (xfs_has_rmapbt(mp)) {
-		fprintf(stderr,
-	_("%s: Reverse mapping btree not compatible with realtime device. Please try a newer xfsprogs.\n"),
+	_("%s: Reflink not compatible with realtime extent size > 1. Please try a newer xfsprogs.\n"),
 				progname);
 		return -1;
 	}
@@ -318,11 +317,7 @@ rtmount_init(
 			progname);
 		return -1;
 	}
-	mp->m_rsumlevels = mp->m_sb.sb_rextslog + 1;
-	rsumblocks = xfs_rtsummary_blockcount(mp, mp->m_rsumlevels,
-			mp->m_sb.sb_rbmblocks);
-	mp->m_rsumsize = XFS_FSB_TO_B(mp, rsumblocks);
-	mp->m_rbmip = mp->m_rsumip = NULL;
+	mp->m_rsumblocks = xfs_rtsummary_blockcount(mp, &mp->m_rsumlevels);
 
 	/*
 	 * Allow debugger to be run without the realtime device present.
@@ -357,7 +352,7 @@ xfs_set_inode_alloc_perag(
 	xfs_ino_t		ino,
 	xfs_agnumber_t		max_metadata)
 {
-	if (!xfs_is_inode32(pag->pag_mount)) {
+	if (!xfs_is_inode32(pag_mount(pag))) {
 		set_bit(XFS_AGSTATE_ALLOWS_INODES, &pag->pag_opstate);
 		clear_bit(XFS_AGSTATE_PREFERS_METADATA, &pag->pag_opstate);
 		return false;
@@ -370,7 +365,7 @@ xfs_set_inode_alloc_perag(
 	}
 
 	set_bit(XFS_AGSTATE_ALLOWS_INODES, &pag->pag_opstate);
-	if (pag->pag_agno < max_metadata)
+	if (pag_agno(pag) < max_metadata)
 		set_bit(XFS_AGSTATE_PREFERS_METADATA, &pag->pag_opstate);
 	else
 		clear_bit(XFS_AGSTATE_PREFERS_METADATA, &pag->pag_opstate);
@@ -565,7 +560,7 @@ libxfs_buftarg_init(
 				progname);
 			exit(1);
 		}
-		if (xi->rt.dev &&
+		if ((xi->rt.dev || xi->rt.dev == xi->data.dev) &&
 		    (mp->m_rtdev_targp->bt_bdev != xi->rt.dev ||
 		     mp->m_rtdev_targp->bt_mount != mp)) {
 			fprintf(stderr,
@@ -582,7 +577,11 @@ libxfs_buftarg_init(
 	else
 		mp->m_logdev_targp = libxfs_buftarg_alloc(mp, xi, &xi->log,
 				lfail);
-	mp->m_rtdev_targp = libxfs_buftarg_alloc(mp, xi, &xi->rt, rfail);
+	if (!xi->rt.dev || xi->rt.dev == xi->data.dev)
+		mp->m_rtdev_targp = mp->m_ddev_targp;
+	else
+		mp->m_rtdev_targp = libxfs_buftarg_alloc(mp, xi, &xi->rt,
+				rfail);
 }
 
 /* Compute maximum possible height for per-AG btree types for this fs. */
@@ -595,6 +594,15 @@ xfs_agbtree_compute_maxlevels(
 	levels = max(mp->m_alloc_maxlevels, M_IGEO(mp)->inobt_maxlevels);
 	levels = max(levels, mp->m_rmap_maxlevels);
 	mp->m_agbtree_maxlevels = max(levels, mp->m_refc_maxlevels);
+}
+
+/* Compute maximum possible height for realtime btree types for this fs. */
+static inline void
+xfs_rtbtree_compute_maxlevels(
+	struct xfs_mount	*mp)
+{
+	mp->m_rtbtree_maxlevels = max(mp->m_rtrmap_maxlevels,
+				      mp->m_rtrefc_maxlevels);
 }
 
 /* Compute maximum possible height of all btrees. */
@@ -610,10 +618,33 @@ libxfs_compute_all_maxlevels(
 	igeo->attr_fork_offset = xfs_bmap_compute_attr_offset(mp);
 	xfs_ialloc_setup_geometry(mp);
 	xfs_rmapbt_compute_maxlevels(mp);
+	xfs_rtrmapbt_compute_maxlevels(mp);
 	xfs_refcountbt_compute_maxlevels(mp);
+	xfs_rtrefcountbt_compute_maxlevels(mp);
 
 	xfs_agbtree_compute_maxlevels(mp);
+	xfs_rtbtree_compute_maxlevels(mp);
+}
 
+/* Mount the metadata files under the metadata directory tree. */
+STATIC void
+libxfs_mount_setup_metadir(
+	struct xfs_mount	*mp)
+{
+	int			error;
+
+	/* Ignore filesystems that are under construction. */
+	if (mp->m_sb.sb_inprogress)
+		return;
+
+	error = -libxfs_metafile_iget(mp, mp->m_sb.sb_metadirino,
+			XFS_METAFILE_DIR, &mp->m_metadirip);
+	if (error) {
+		fprintf(stderr,
+ _("%s: Failed to load metadir root directory, error %d\n"),
+					progname, error);
+		return;
+	}
 }
 
 /*
@@ -633,6 +664,49 @@ xfs_set_low_space_thresholds(
 }
 
 /*
+ * libxfs_initialize_rtgroup will allocate a rtgroup structure for each
+ * rtgroup.  If rgcount is corrupted and insanely high, this will OOM the box.
+ * Try to read what would be the last rtgroup superblock.  If that fails, read
+ * the first one and let the user know to check the geometry.
+ */
+static inline bool
+check_many_rtgroups(
+	struct xfs_mount	*mp,
+	struct xfs_sb		*sbp)
+{
+	struct xfs_buf		*bp;
+	xfs_daddr_t		d;
+	int			error;
+
+	if (!mp->m_rtdev->bt_bdev) {
+		fprintf(stderr, _("%s: no rt device, ignoring rgcount %u\n"),
+				progname, sbp->sb_rgcount);
+		if (!xfs_is_debugger(mp))
+			return false;
+
+		sbp->sb_rgcount = 0;
+		return true;
+	}
+
+	d = (xfs_daddr_t)XFS_FSB_TO_BB(mp, mp->m_sb.sb_rblocks);
+	error = libxfs_buf_read(mp->m_rtdev, d - XFS_FSB_TO_BB(mp, 1), 1, 0,
+			&bp, NULL);
+	if (!error) {
+		libxfs_buf_relse(bp);
+		return true;
+	}
+
+	fprintf(stderr, _("%s: read of rtgroup %u failed\n"), progname,
+			sbp->sb_rgcount - 1);
+	if (!xfs_is_debugger(mp))
+		return false;
+
+	fprintf(stderr, _("%s: limiting reads to rtgroup 0\n"), progname);
+	sbp->sb_rgcount = 1;
+	return true;
+}
+
+/*
  * Mount structure initialization, provides a filled-in xfs_mount_t
  * such that the numerous XFS_* macros can be used.  If dev is zero,
  * no IO will be performed (no size checks, read root inodes).
@@ -647,6 +721,7 @@ libxfs_mount(
 	struct xfs_buf		*bp;
 	struct xfs_sb		*sbp;
 	xfs_daddr_t		d;
+	int			i;
 	int			error;
 
 	mp->m_features = xfs_sb_version_to_features(sb);
@@ -664,7 +739,8 @@ libxfs_mount(
 	mp->m_finobt_nores = true;
 	xfs_set_inode32(mp);
 	mp->m_sb = *sb;
-	INIT_RADIX_TREE(&mp->m_perag_tree, GFP_KERNEL);
+	for (i = 0; i < XG_TYPE_MAX; i++)
+		xa_init(&mp->m_groups[i].xa);
 	sbp = &mp->m_sb;
 	spin_lock_init(&mp->m_sb_lock);
 	spin_lock_init(&mp->m_agirotor_lock);
@@ -786,14 +862,30 @@ libxfs_mount(
 			libxfs_buf_relse(bp);
 	}
 
-	error = libxfs_initialize_perag(mp, sbp->sb_agcount, sbp->sb_dblocks,
-			&mp->m_maxagi);
+	if (sbp->sb_rgcount > 1000000 && !check_many_rtgroups(mp, sbp))
+		goto out_da;
+
+	error = libxfs_initialize_perag(mp, 0, sbp->sb_agcount,
+			sbp->sb_dblocks, &mp->m_maxagi);
 	if (error) {
 		fprintf(stderr, _("%s: perag init failed\n"),
 			progname);
 		exit(1);
 	}
 	xfs_set_perag_data_loaded(mp);
+
+	if (xfs_has_metadir(mp))
+		libxfs_mount_setup_metadir(mp);
+
+	error = libxfs_initialize_rtgroups(mp, 0, sbp->sb_rgcount,
+			sbp->sb_rextents);
+	if (error) {
+		fprintf(stderr, _("%s: rtgroup init failed\n"),
+			progname);
+		exit(1);
+	}
+
+	xfs_set_rtgroup_data_loaded(mp);
 
 	return mp;
 out_da:
@@ -802,13 +894,18 @@ out_da:
 }
 
 void
-libxfs_rtmount_destroy(xfs_mount_t *mp)
+libxfs_rtmount_destroy(
+	struct xfs_mount	*mp)
 {
-	if (mp->m_rsumip)
-		libxfs_irele(mp->m_rsumip);
-	if (mp->m_rbmip)
-		libxfs_irele(mp->m_rbmip);
-	mp->m_rsumip = mp->m_rbmip = NULL;
+	struct xfs_rtgroup	*rtg = NULL;
+	unsigned int		i;
+
+	while ((rtg = xfs_rtgroup_next(mp, rtg))) {
+		for (i = 0; i < XFS_RTGI_MAX; i++)
+			libxfs_rtginode_irele(&rtg->rtg_inodes[i]);
+		kvfree(rtg->rtg_rsum_cache);
+	}
+	libxfs_rtginode_irele(&mp->m_rtdirip);
 }
 
 /* Flush a device and report on writes that didn't make it to stable storage. */
@@ -885,7 +982,7 @@ libxfs_flush_mount(
 			error = err2;
 	}
 
-	if (mp->m_rtdev_targp) {
+	if (mp->m_rtdev_targp && mp->m_rtdev_targp != mp->m_ddev_targp) {
 		err2 = libxfs_flush_buftarg(mp->m_rtdev_targp,
 				_("realtime device"));
 		if (!error)
@@ -913,6 +1010,8 @@ libxfs_umount(
 	int			error;
 
 	libxfs_rtmount_destroy(mp);
+	if (mp->m_metadirip)
+		libxfs_irele(mp->m_metadirip);
 
 	/*
 	 * Purge the buffer cache to write all dirty buffers to disk and free
@@ -926,15 +1025,18 @@ libxfs_umount(
 	 * Only try to free the per-AG structures if we set them up in the
 	 * first place.
 	 */
+	if (xfs_is_rtgroup_data_loaded(mp))
+		libxfs_free_rtgroups(mp, 0, mp->m_sb.sb_rgcount);
 	if (xfs_is_perag_data_loaded(mp))
-		libxfs_free_perag(mp);
+		libxfs_free_perag_range(mp, 0, mp->m_sb.sb_agcount);
 
 	xfs_da_unmount(mp);
 
 	free(mp->m_fsname);
 	mp->m_fsname = NULL;
 
-	libxfs_buftarg_free(mp->m_rtdev_targp);
+	if (mp->m_rtdev_targp != mp->m_ddev_targp)
+		libxfs_buftarg_free(mp->m_rtdev_targp);
 	if (mp->m_logdev_targp != mp->m_ddev_targp)
 		libxfs_buftarg_free(mp->m_logdev_targp);
 	libxfs_buftarg_free(mp->m_ddev_targp);

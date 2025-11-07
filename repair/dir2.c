@@ -15,6 +15,9 @@
 #include "da_util.h"
 #include "prefetch.h"
 #include "progress.h"
+#include "slab.h"
+#include "rmap.h"
+#include "rt.h"
 
 /*
  * Known bad inode list.  These are seen when the leaf and node
@@ -136,6 +139,29 @@ process_sf_dir2_fixoff(
 	}
 }
 
+static inline bool
+is_metadata_directory(
+	struct xfs_mount	*mp,
+	struct xfs_dinode	*dip)
+{
+	xfs_failaddr_t		fa;
+	uint16_t		mode;
+	uint16_t		flags;
+	uint64_t		flags2;
+
+	if (!xfs_has_metadir(mp))
+		return false;
+	if (dip->di_version < 3 ||
+	    !(dip->di_flags2 & cpu_to_be64(XFS_DIFLAG2_METADATA)))
+		return false;
+
+	mode = be16_to_cpu(dip->di_mode);
+	flags = be16_to_cpu(dip->di_flags);
+	flags2 = be64_to_cpu(dip->di_flags2);
+	fa = libxfs_dinode_verify_metadir(mp, dip, mode, flags, flags2);
+	return fa == NULL;
+}
+
 /*
  * this routine performs inode discovery and tries to fix things
  * in place.  available redundancy -- inode data size should match
@@ -227,21 +253,38 @@ process_sf_dir2(
 		} else if (!libxfs_verify_dir_ino(mp, lino)) {
 			junkit = 1;
 			junkreason = _("invalid");
-		} else if (lino == mp->m_sb.sb_rbmino)  {
+		} else if (is_metadata_directory(mp, dip)) {
+			/*
+			 * Metadata directories are always rebuilt, so don't
+			 * bother checking if the child inode is free or not.
+			 */
+			junkit = 0;
+		} else if (lino == mp->m_sb.sb_rbmino ||
+		           is_rtbitmap_inode(lino)) {
 			junkit = 1;
 			junkreason = _("realtime bitmap");
-		} else if (lino == mp->m_sb.sb_rsumino)  {
+		} else if (lino == mp->m_sb.sb_rsumino ||
+		           is_rtsummary_inode(lino)) {
 			junkit = 1;
 			junkreason = _("realtime summary");
-		} else if (lino == mp->m_sb.sb_uquotino)  {
+		} else if (is_quota_inode(XFS_DQTYPE_USER, lino)) {
 			junkit = 1;
 			junkreason = _("user quota");
-		} else if (lino == mp->m_sb.sb_gquotino)  {
+		} else if (is_quota_inode(XFS_DQTYPE_GROUP, lino)) {
 			junkit = 1;
 			junkreason = _("group quota");
-		} else if (lino == mp->m_sb.sb_pquotino)  {
+		} else if (is_quota_inode(XFS_DQTYPE_PROJ, lino)) {
 			junkit = 1;
 			junkreason = _("project quota");
+		} else if (lino == mp->m_sb.sb_metadirino)  {
+			junkit = 1;
+			junkreason = _("metadata directory root");
+		} else if (is_rtrmap_inode(lino)) {
+			junkit = 1;
+			junkreason = _("realtime rmap");
+		} else if (is_rtrefcount_inode(lino)) {
+			junkit = 1;
+			junkreason = _("realtime refcount");
 		} else if ((irec_p = find_inode_rec(mp,
 					XFS_INO_TO_AGNO(mp, lino),
 					XFS_INO_TO_AGINO(mp, lino))) != NULL) {
@@ -535,7 +578,8 @@ _("corrected root directory %" PRIu64 " .. entry, was %" PRIu64 ", now %" PRIu64
 _("would have corrected root directory %" PRIu64 " .. entry from %" PRIu64" to %" PRIu64 "\n"),
 				ino, *parent, ino);
 		}
-	} else if (ino == *parent && ino != mp->m_sb.sb_rootino)  {
+	} else if (ino == *parent && ino != mp->m_sb.sb_rootino &&
+		   ino != mp->m_sb.sb_metadirino)  {
 		/*
 		 * likewise, non-root directories can't have .. pointing
 		 * to .
@@ -698,16 +742,30 @@ process_dir2_data(
 			 * directory since it's still structurally intact.
 			 */
 			clearreason = _("invalid");
-		} else if (ent_ino == mp->m_sb.sb_rbmino) {
+		} else if (is_metadata_directory(mp, dip)) {
+			/*
+			 * Metadata directories are always rebuilt, so don't
+			 * bother checking if the child inode is free or not.
+			 */
+			clearino = 0;
+		} else if (ent_ino == mp->m_sb.sb_rbmino ||
+		           is_rtbitmap_inode(ent_ino)) {
 			clearreason = _("realtime bitmap");
-		} else if (ent_ino == mp->m_sb.sb_rsumino) {
+		} else if (ent_ino == mp->m_sb.sb_rsumino ||
+		           is_rtsummary_inode(ent_ino)) {
 			clearreason = _("realtime summary");
-		} else if (ent_ino == mp->m_sb.sb_uquotino) {
+		} else if (is_quota_inode(XFS_DQTYPE_USER, ent_ino)) {
 			clearreason = _("user quota");
-		} else if (ent_ino == mp->m_sb.sb_gquotino) {
+		} else if (is_quota_inode(XFS_DQTYPE_GROUP, ent_ino)) {
 			clearreason = _("group quota");
-		} else if (ent_ino == mp->m_sb.sb_pquotino) {
+		} else if (is_quota_inode(XFS_DQTYPE_PROJ, ent_ino)) {
 			clearreason = _("project quota");
+		} else if (ent_ino == mp->m_sb.sb_metadirino)  {
+			clearreason = _("metadata directory root");
+		} else if (is_rtrmap_inode(ent_ino)) {
+			clearreason = _("realtime rmap");
+		} else if (is_rtrefcount_inode(ent_ino)) {
+			clearreason = _("realtime refcount");
 		} else {
 			irec_p = find_inode_rec(mp,
 						XFS_INO_TO_AGNO(mp, ent_ino),
@@ -829,7 +887,8 @@ _("entry at block %u offset %" PRIdPTR " in directory inode %" PRIu64 " has ille
 				 * NULLFSINO otherwise.
 				 */
 				if (ino == ent_ino &&
-						ino != mp->m_sb.sb_rootino) {
+				    ino != mp->m_sb.sb_rootino &&
+				    ino != mp->m_sb.sb_metadirino) {
 					*parent = NULLFSINO;
 					do_warn(
 _("bad .. entry in directory inode %" PRIu64 ", points to self: "),
@@ -1484,9 +1543,14 @@ process_dir2(
 	} else if (dotdot == 0 && ino == mp->m_sb.sb_rootino) {
 		do_warn(_("no .. entry for root directory %" PRIu64 "\n"), ino);
 		need_root_dotdot = 1;
+	} else if (dotdot == 0 && ino == mp->m_sb.sb_metadirino) {
+		do_warn(_("no .. entry for metaino directory %" PRIu64 "\n"), ino);
+		need_metadir_dotdot = 1;
 	}
 
 	ASSERT((ino != mp->m_sb.sb_rootino && ino != *parent) ||
+		(ino == mp->m_sb.sb_metadirino &&
+			(ino == *parent || need_metadir_dotdot == 1)) ||
 		(ino == mp->m_sb.sb_rootino &&
 			(ino == *parent || need_root_dotdot == 1)));
 

@@ -31,6 +31,7 @@ struct summary_counts {
 
 	/* Free space histogram, in fsb */
 	struct histogram	datadev_hist;
+	struct histogram	rtdev_hist;
 };
 
 /*
@@ -56,6 +57,7 @@ summary_count_init(
 	struct summary_counts	*counts = data;
 
 	init_freesp_hist(&counts->datadev_hist);
+	init_freesp_hist(&counts->rtdev_hist);
 }
 
 /* Record block usage. */
@@ -66,22 +68,36 @@ count_block_summary(
 	void			*arg)
 {
 	struct summary_counts	*counts;
+	bool			is_rt = false;
 	unsigned long long	len;
 	int			ret;
+
+	if (ctx->mnt.fsgeom.rtstart) {
+		if (fsmap->fmr_device == XFS_DEV_LOG)
+			return 0;
+		if (fsmap->fmr_device == XFS_DEV_RT)
+			is_rt = true;
+	} else {
+		if (fsmap->fmr_device == ctx->fsinfo.fs_logdev)
+			return 0;
+		if (fsmap->fmr_device == ctx->fsinfo.fs_rtdev)
+			is_rt = true;
+	}
 
 	counts = ptvar_get((struct ptvar *)arg, &ret);
 	if (ret) {
 		str_liberror(ctx, -ret, _("retrieving summary counts"));
 		return -ret;
 	}
-	if (fsmap->fmr_device == ctx->fsinfo.fs_logdev)
-		return 0;
+
 	if ((fsmap->fmr_flags & FMR_OF_SPECIAL_OWNER) &&
 	    fsmap->fmr_owner == XFS_FMR_OWN_FREE) {
 		uint64_t	blocks;
 
 		blocks = cvt_b_to_off_fsbt(&ctx->mnt, fsmap->fmr_length);
-		if (fsmap->fmr_device == ctx->fsinfo.fs_datadev)
+		if (is_rt)
+			hist_add(&counts->rtdev_hist, blocks);
+		else
 			hist_add(&counts->datadev_hist, blocks);
 		return 0;
 	}
@@ -90,10 +106,10 @@ count_block_summary(
 
 	/* freesp btrees live in free space, need to adjust counters later. */
 	if ((fsmap->fmr_flags & FMR_OF_SPECIAL_OWNER) &&
-	    fsmap->fmr_owner == XFS_FMR_OWN_AG) {
+	    fsmap->fmr_owner == XFS_FMR_OWN_AG)
 		counts->agbytes += fsmap->fmr_length;
-	}
-	if (fsmap->fmr_device == ctx->fsinfo.fs_rtdev) {
+
+	if (is_rt) {
 		/* Count realtime extents. */
 		counts->rbytes += len;
 	} else {
@@ -124,7 +140,9 @@ add_summaries(
 	total->agbytes += item->agbytes;
 
 	hist_import(&total->datadev_hist, &item->datadev_hist);
+	hist_import(&total->rtdev_hist, &item->rtdev_hist);
 	hist_free(&item->datadev_hist);
+	hist_free(&item->rtdev_hist);
 	return 0;
 }
 
@@ -195,6 +213,7 @@ phase7_func(
 
 	/* Preserve free space histograms for phase 8. */
 	hist_move(&ctx->datadev_hist, &totalcount.datadev_hist);
+	hist_move(&ctx->rtdev_hist, &totalcount.rtdev_hist);
 
 	/* Scan the whole fs. */
 	error = scrub_count_all_inodes(ctx, &counted_inodes);

@@ -14,6 +14,7 @@
 #include "fprint.h"
 #include "field.h"
 #include "inode.h"
+#include "namei.h"
 
 /* Path lookup */
 
@@ -47,7 +48,7 @@ path_parse(
 	const char	*p = path;
 	const char	*endp = path + strlen(path);
 
-	dirpath = calloc(sizeof(*dirpath), 1);
+	dirpath = calloc(1, sizeof(*dirpath));
 	if (!dirpath)
 		return NULL;
 
@@ -87,14 +88,17 @@ path_navigate(
 	xfs_ino_t		rootino,
 	struct dirpath		*dirpath)
 {
+	struct xfs_trans	*tp;
 	struct xfs_inode	*dp;
 	xfs_ino_t		ino = rootino;
 	unsigned int		i;
 	int			error;
 
-	error = -libxfs_iget(mp, NULL, ino, 0, &dp);
+	tp = libxfs_trans_alloc_empty(mp);
+
+	error = -libxfs_iget(mp, tp, ino, 0, &dp);
 	if (error)
-		return error;
+		goto out_trans;
 
 	for (i = 0; i < dirpath->depth; i++) {
 		struct xfs_name	xname = {
@@ -104,46 +108,48 @@ path_navigate(
 
 		if (!S_ISDIR(VFS_I(dp)->i_mode)) {
 			error = ENOTDIR;
-			goto rele;
+			goto out_rele;
 		}
 
-		error = -libxfs_dir_lookup(NULL, dp, &xname, &ino, NULL);
+		error = -libxfs_dir_lookup(tp, dp, &xname, &ino, NULL);
 		if (error)
-			goto rele;
+			goto out_rele;
 		if (!xfs_verify_ino(mp, ino)) {
 			error = EFSCORRUPTED;
-			goto rele;
+			goto out_rele;
 		}
 
 		libxfs_irele(dp);
 		dp = NULL;
 
-		error = -libxfs_iget(mp, NULL, ino, 0, &dp);
+		error = -libxfs_iget(mp, tp, ino, 0, &dp);
 		switch (error) {
 		case EFSCORRUPTED:
 		case EFSBADCRC:
 		case 0:
 			break;
 		default:
-			return error;
+			goto out_trans;
 		}
 	}
 
 	set_cur_inode(ino);
-rele:
+out_rele:
 	if (dp)
 		libxfs_irele(dp);
+out_trans:
+	libxfs_trans_cancel(tp);
 	return error;
 }
 
 /* Walk a directory path to an inode and set the io cursor to that inode. */
-static int
+int
 path_walk(
-	char		*path)
+	xfs_ino_t	rootino,
+	const char	*path)
 {
 	struct dirpath	*dirpath;
-	char		*p = path;
-	xfs_ino_t	rootino = mp->m_sb.sb_rootino;
+	const char	*p = path;
 	int		error = 0;
 
 	if (*p == '/') {
@@ -173,6 +179,9 @@ path_help(void)
 	dbprintf(_(
 "\n"
 " Navigate to an inode via directory path.\n"
+"\n"
+" Options:\n"
+"   -m -- Walk an absolute path down the metadata directory tree.\n"
 	));
 }
 
@@ -181,18 +190,34 @@ path_f(
 	int		argc,
 	char		**argv)
 {
+	xfs_ino_t	rootino = mp->m_sb.sb_rootino;
 	int		c;
 	int		error;
 
-	while ((c = getopt(argc, argv, "")) != -1) {
+	while ((c = getopt(argc, argv, "m")) != -1) {
 		switch (c) {
+		case 'm':
+			/* Absolute path, start from metadata rootdir. */
+			if (!xfs_has_metadir(mp)) {
+				dbprintf(
+	_("filesystem does not support metadata directories.\n"));
+				exitcode = 1;
+				return 0;
+			}
+			rootino = mp->m_sb.sb_metadirino;
+			break;
 		default:
 			path_help();
 			return 0;
 		}
 	}
 
-	error = path_walk(argv[optind]);
+	if (argc == optind || argc > optind + 1) {
+		dbprintf(_("Only supply one path.\n"));
+		return -1;
+	}
+
+	error = path_walk(rootino, argv[optind]);
 	if (error) {
 		dbprintf("%s: %s\n", argv[optind], strerror(error));
 		exitcode = 1;
@@ -206,7 +231,7 @@ static struct cmdinfo path_cmd = {
 	.altname	= NULL,
 	.cfunc		= path_f,
 	.argmin		= 1,
-	.argmax		= 1,
+	.argmax		= -1,
 	.canpush	= 0,
 	.args		= "",
 	.help		= path_help,
@@ -240,15 +265,18 @@ get_dstr(
 	return filetype_strings[filetype];
 }
 
-static void
-dir_emit(
-	struct xfs_mount	*mp,
+static int
+print_dirent(
+	struct xfs_trans	*tp,
+	struct xfs_inode	*dp,
 	xfs_dir2_dataptr_t	off,
 	char			*name,
 	ssize_t			namelen,
 	xfs_ino_t		ino,
-	uint8_t			dtype)
+	uint8_t			dtype,
+	void			*private)
 {
+	struct xfs_mount	*mp = dp->i_mount;
 	char			*display_name;
 	struct xfs_name		xname = { .name = (unsigned char *)name };
 	const char		*dstr = get_dstr(mp, dtype);
@@ -280,11 +308,14 @@ dir_emit(
 
 	if (display_name != name)
 		free(display_name);
+	return 0;
 }
 
 static int
 list_sfdir(
-	struct xfs_da_args		*args)
+	struct xfs_da_args		*args,
+	dir_emit_t			dir_emit,
+	void				*private)
 {
 	struct xfs_inode		*dp = args->dp;
 	struct xfs_mount		*mp = dp->i_mount;
@@ -295,17 +326,24 @@ list_sfdir(
 	xfs_dir2_dataptr_t		off;
 	unsigned int			i;
 	uint8_t				filetype;
+	int				error;
 
 	/* . and .. entries */
 	off = xfs_dir2_db_off_to_dataptr(geo, geo->datablk,
 			geo->data_entry_offset);
-	dir_emit(args->dp->i_mount, off, ".", -1, dp->i_ino, XFS_DIR3_FT_DIR);
+	error = dir_emit(args->trans, args->dp, off, ".", -1, dp->i_ino,
+			XFS_DIR3_FT_DIR, private);
+	if (error)
+		return error;
 
 	ino = libxfs_dir2_sf_get_parent_ino(sfp);
 	off = xfs_dir2_db_off_to_dataptr(geo, geo->datablk,
 			geo->data_entry_offset +
 			libxfs_dir2_data_entsize(mp, sizeof(".") - 1));
-	dir_emit(args->dp->i_mount, off, "..", -1, ino, XFS_DIR3_FT_DIR);
+	error = dir_emit(args->trans, args->dp, off, "..", -1, ino,
+			XFS_DIR3_FT_DIR, private);
+	if (error)
+		return error;
 
 	/* Walk everything else. */
 	sfep = xfs_dir2_sf_firstentry(sfp);
@@ -315,8 +353,11 @@ list_sfdir(
 		off = xfs_dir2_db_off_to_dataptr(geo, geo->datablk,
 				xfs_dir2_sf_get_offset(sfep));
 
-		dir_emit(args->dp->i_mount, off, (char *)sfep->name,
-				sfep->namelen, ino, filetype);
+		error = dir_emit(args->trans, args->dp, off,
+				(char *)sfep->name, sfep->namelen, ino,
+				filetype, private);
+		if (error)
+			return error;
 		sfep = libxfs_dir2_sf_nextentry(mp, sfp, sfep);
 	}
 
@@ -326,7 +367,9 @@ list_sfdir(
 /* List entries in block format directory. */
 static int
 list_blockdir(
-	struct xfs_da_args	*args)
+	struct xfs_da_args	*args,
+	dir_emit_t		dir_emit,
+	void			*private)
 {
 	struct xfs_inode	*dp = args->dp;
 	struct xfs_mount	*mp = dp->i_mount;
@@ -337,7 +380,7 @@ list_blockdir(
 	unsigned int		end;
 	int			error;
 
-	error = xfs_dir3_block_read(NULL, dp, args->owner, &bp);
+	error = xfs_dir3_block_read(args->trans, dp, args->owner, &bp);
 	if (error)
 		return error;
 
@@ -357,8 +400,11 @@ list_blockdir(
 		diroff = xfs_dir2_db_off_to_dataptr(geo, geo->datablk, offset);
 		offset += libxfs_dir2_data_entsize(mp, dep->namelen);
 		filetype = libxfs_dir2_data_get_ftype(dp->i_mount, dep);
-		dir_emit(mp, diroff, (char *)dep->name, dep->namelen,
-				be64_to_cpu(dep->inumber), filetype);
+		error = dir_emit(args->trans, args->dp, diroff,
+				(char *)dep->name, dep->namelen,
+				be64_to_cpu(dep->inumber), filetype, private);
+		if (error)
+			break;
 	}
 
 	libxfs_trans_brelse(args->trans, bp);
@@ -368,7 +414,9 @@ list_blockdir(
 /* List entries in leaf format directory. */
 static int
 list_leafdir(
-	struct xfs_da_args	*args)
+	struct xfs_da_args	*args,
+	dir_emit_t		dir_emit,
+	void			*private)
 {
 	struct xfs_bmbt_irec	map;
 	struct xfs_iext_cursor	icur;
@@ -382,7 +430,7 @@ list_leafdir(
 	int			error = 0;
 
 	/* Read extent map. */
-	error = -libxfs_iread_extents(NULL, dp, XFS_DATA_FORK);
+	error = -libxfs_iread_extents(args->trans, dp, XFS_DATA_FORK);
 	if (error)
 		return error;
 
@@ -398,7 +446,7 @@ list_leafdir(
 		libxfs_trim_extent(&map, dabno, geo->leafblk - dabno);
 
 		/* Read the directory block of that first mapping. */
-		error = xfs_dir3_data_read(NULL, dp, args->owner,
+		error = xfs_dir3_data_read(args->trans, dp, args->owner,
 				map.br_startoff, 0, &bp);
 		if (error)
 			break;
@@ -423,28 +471,36 @@ list_leafdir(
 			offset += libxfs_dir2_data_entsize(mp, dep->namelen);
 			filetype = libxfs_dir2_data_get_ftype(mp, dep);
 
-			dir_emit(mp, xfs_dir2_byte_to_dataptr(dirboff + offset),
+			error = dir_emit(args->trans, args->dp,
+					xfs_dir2_byte_to_dataptr(dirboff + offset),
 					(char *)dep->name, dep->namelen,
-					be64_to_cpu(dep->inumber), filetype);
+					be64_to_cpu(dep->inumber), filetype,
+					private);
+			if (error)
+				break;
 		}
 
 		dabno += XFS_DADDR_TO_FSB(mp, bp->b_length);
-		libxfs_buf_relse(bp);
+		libxfs_trans_brelse(args->trans, bp);
 		bp = NULL;
 	}
 
 	if (bp)
-		libxfs_buf_relse(bp);
+		libxfs_trans_brelse(args->trans, bp);
 
 	return error;
 }
 
 /* Read the directory, display contents. */
-static int
+int
 listdir(
-	struct xfs_inode	*dp)
+	struct xfs_trans	*tp,
+	struct xfs_inode	*dp,
+	dir_emit_t		dir_emit,
+	void			*private)
 {
 	struct xfs_da_args	args = {
+		.trans		= tp,
 		.dp		= dp,
 		.geo		= dp->i_mount->m_dir_geo,
 		.owner		= dp->i_ino,
@@ -453,14 +509,14 @@ listdir(
 
 	switch (libxfs_dir2_format(&args, &error)) {
 	case XFS_DIR2_FMT_SF:
-		return list_sfdir(&args);
+		return list_sfdir(&args, dir_emit, private);
 	case XFS_DIR2_FMT_BLOCK:
-		return list_blockdir(&args);
+		return list_blockdir(&args, dir_emit, private);
 	case XFS_DIR2_FMT_LEAF:
 	case XFS_DIR2_FMT_NODE:
-		return list_leafdir(&args);
+		return list_leafdir(&args, dir_emit, private);
 	default:
-		return error;
+		return EFSCORRUPTED;
 	}
 }
 
@@ -500,7 +556,7 @@ ls_cur(
 	if (tag)
 		dbprintf(_("%s:\n"), tag);
 
-	error = listdir(dp);
+	error = listdir(NULL, dp, print_dirent, NULL);
 	if (error)
 		goto rele;
 
@@ -519,6 +575,7 @@ ls_help(void)
 " Options:\n"
 "   -i -- Resolve the given paths to their corresponding inode numbers.\n"
 "         If no paths are given, display the current inode number.\n"
+"   -m -- Walk an absolute path down the metadata directory tree.\n"
 "\n"
 " Directory contents will be listed in the format:\n"
 " dir_cookie	inode_number	type	hash	name_length	name\n"
@@ -530,14 +587,25 @@ ls_f(
 	int			argc,
 	char			**argv)
 {
+	xfs_ino_t		rootino = mp->m_sb.sb_rootino;
 	bool			inum_only = false;
 	int			c;
 	int			error = 0;
 
-	while ((c = getopt(argc, argv, "i")) != -1) {
+	while ((c = getopt(argc, argv, "im")) != -1) {
 		switch (c) {
 		case 'i':
 			inum_only = true;
+			break;
+		case 'm':
+			/* Absolute path, start from metadata rootdir. */
+			if (!xfs_has_metadir(mp)) {
+				dbprintf(
+	_("filesystem does not support metadata directories.\n"));
+				exitcode = 1;
+				return 0;
+			}
+			rootino = mp->m_sb.sb_metadirino;
 			break;
 		default:
 			ls_help();
@@ -561,7 +629,7 @@ ls_f(
 	for (c = optind; c < argc; c++) {
 		push_cur();
 
-		error = path_walk(argv[c]);
+		error = path_walk(rootino, argv[c]);
 		if (error)
 			goto err_cur;
 
@@ -860,11 +928,22 @@ parent_f(
 	int			argc,
 	char			**argv)
 {
+	xfs_ino_t		rootino = mp->m_sb.sb_rootino;
 	int			c;
 	int			error = 0;
 
-	while ((c = getopt(argc, argv, "")) != -1) {
+	while ((c = getopt(argc, argv, "m")) != -1) {
 		switch (c) {
+		case 'm':
+			/* Absolute path, start from metadata rootdir. */
+			if (!xfs_has_metadir(mp)) {
+				dbprintf(
+	_("filesystem does not support metadata directories.\n"));
+				exitcode = 1;
+				return 0;
+			}
+			rootino = mp->m_sb.sb_metadirino;
+			break;
 		default:
 			ls_help();
 			return 0;
@@ -884,7 +963,7 @@ parent_f(
 	for (c = optind; c < argc; c++) {
 		push_cur();
 
-		error = path_walk(argv[c]);
+		error = path_walk(rootino, argv[c]);
 		if (error)
 			goto err_cur;
 
@@ -912,7 +991,7 @@ static struct cmdinfo parent_cmd = {
 	.argmin		= 0,
 	.argmax		= -1,
 	.canpush	= 0,
-	.args		= "[paths...]",
+	.args		= "[-m] [paths...]",
 	.help		= parent_help,
 };
 
@@ -926,6 +1005,7 @@ link_help(void)
 "\n"
 " Options:\n"
 "   -i   -- Point to this specific inode number.\n"
+"   -m   -- Select the metadata directory tree.\n"
 "   -p   -- Point to the inode given by this path.\n"
 "   -t   -- Set the file type to this value.\n"
 "   name -- Create this directory entry with this name.\n"
@@ -1039,11 +1119,12 @@ link_f(
 {
 	xfs_ino_t		child_ino = NULLFSINO;
 	int			ftype = XFS_DIR3_FT_UNKNOWN;
+	xfs_ino_t		rootino = mp->m_sb.sb_rootino;
 	unsigned int		i;
 	int			c;
 	int			error = 0;
 
-	while ((c = getopt(argc, argv, "i:p:t:")) != -1) {
+	while ((c = getopt(argc, argv, "i:mp:t:")) != -1) {
 		switch (c) {
 		case 'i':
 			errno = 0;
@@ -1054,9 +1135,12 @@ link_f(
 				return 0;
 			}
 			break;
+		case 'm':
+			rootino = mp->m_sb.sb_metadirino;
+			break;
 		case 'p':
 			push_cur();
-			error = path_walk(optarg);
+			error = path_walk(rootino, optarg);
 			if (error) {
 				printf("%s: %s\n", optarg, strerror(error));
 				exitcode = 1;
@@ -1126,7 +1210,7 @@ static struct cmdinfo link_cmd = {
 	.argmin		= 0,
 	.argmax		= -1,
 	.canpush	= 0,
-	.args		= "[-i ino] [-p path] [-t ftype] name",
+	.args		= "[-i ino] [-m] [-p path] [-t ftype] name",
 	.help		= link_help,
 };
 

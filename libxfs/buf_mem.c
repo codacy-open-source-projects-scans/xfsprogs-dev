@@ -34,6 +34,36 @@
 unsigned int	XMBUF_BLOCKSIZE;
 unsigned int	XMBUF_BLOCKSHIFT;
 
+long		xmbuf_max_mappings;
+static atomic_t	xmbuf_mappings;
+bool		xmbuf_unmap_early = false;
+
+static long
+get_max_mmap_count(void)
+{
+	char	buffer[64];
+	char	*p = NULL;
+	long	ret = -1;
+	FILE	*file;
+
+	file = fopen("/proc/sys/vm/max_map_count", "r");
+	if (!file)
+		return -1;
+
+	while (fgets(buffer, sizeof(buffer), file)) {
+		errno = 0;
+		ret = strtol(buffer, &p, 0);
+		if (errno || p == buffer)
+			continue;
+
+		/* only take half the maximum mmap count so others can use it */
+		ret /= 2;
+		break;
+	}
+	fclose(file);
+	return ret;
+}
+
 void
 xmbuf_libinit(void)
 {
@@ -45,7 +75,64 @@ xmbuf_libinit(void)
 
 	XMBUF_BLOCKSIZE = ret;
 	XMBUF_BLOCKSHIFT = libxfs_highbit32(XMBUF_BLOCKSIZE);
+
+	/*
+	 * Figure out how many mmaps we will use simultaneously.  Pick a low
+	 * default if we can't query procfs.
+	 */
+	xmbuf_max_mappings = get_max_mmap_count();
+	if (xmbuf_max_mappings < 0)
+		xmbuf_max_mappings = 1024;
 }
+
+/* Directly map a memfd page into the buffer cache. */
+static int
+xmbuf_map_page(
+	struct xfs_buf		*bp)
+{
+	struct xfile		*xfile = bp->b_target->bt_xfile;
+	void			*p;
+	loff_t			pos;
+
+	pos = xfile->partition_pos + BBTOB(xfs_buf_daddr(bp));
+	p = mmap(NULL, BBTOB(bp->b_length), PROT_READ | PROT_WRITE, MAP_SHARED,
+			xfile->fcb->fd, pos);
+	if (p == MAP_FAILED) {
+		if (errno == ENOMEM && !xmbuf_unmap_early) {
+#ifdef DEBUG
+			fprintf(stderr, "xmbuf could not make mappings!\n");
+#endif
+			xmbuf_unmap_early = true;
+		}
+		return errno;
+	}
+
+	if (!xmbuf_unmap_early &&
+	    atomic_inc_return(&xmbuf_mappings) > xmbuf_max_mappings) {
+#ifdef DEBUG
+		fprintf(stderr, _("xmbuf hit too many mappings (%ld)!\n",
+					xmbuf_max_mappings);
+#endif
+		xmbuf_unmap_early = true;
+	}
+
+	bp->b_addr = p;
+	bp->b_flags |= LIBXFS_B_UPTODATE | LIBXFS_B_UNCHECKED;
+	bp->b_error = 0;
+	return 0;
+}
+
+/* Unmap a memfd page that was mapped into the buffer cache. */
+static void
+xmbuf_unmap_page(
+	struct xfs_buf		*bp)
+{
+	if (!xmbuf_unmap_early)
+		atomic_dec(&xmbuf_mappings);
+	munmap(bp->b_addr, BBTOB(bp->b_length));
+	bp->b_addr = NULL;
+}
+
 
 /* Allocate a new cache node (aka a xfs_buf) */
 static struct cache_node *
@@ -105,7 +192,8 @@ xmbuf_cache_relse(
 	struct xfs_buf		*bp;
 
 	bp = container_of(node, struct xfs_buf, b_node);
-	xmbuf_unmap_page(bp);
+	if (bp->b_addr)
+		xmbuf_unmap_page(bp);
 	kmem_cache_free(xfs_buf_cache, bp);
 }
 
@@ -129,13 +217,50 @@ xmbuf_cache_bulkrelse(
 	return count;
 }
 
+static int
+xmbuf_cache_node_get(
+	struct cache_node	*node)
+{
+	struct xfs_buf		*bp =
+		container_of(node, struct xfs_buf, b_node);
+	int			error;
+
+	if (bp->b_addr != NULL)
+		return 0;
+
+	error = xmbuf_map_page(bp);
+	if (error) {
+		fprintf(stderr,
+ _("%s: %s can't mmap %u bytes at xfile offset %llu: %s\n"),
+				progname, __FUNCTION__, BBTOB(bp->b_length),
+				(unsigned long long)xfs_buf_daddr(bp),
+				strerror(error));
+		return error;
+	}
+
+	return 0;
+}
+
+static void
+xmbuf_cache_node_put(
+	struct cache_node	*node)
+{
+	struct xfs_buf		*bp =
+		container_of(node, struct xfs_buf, b_node);
+
+	if (xmbuf_unmap_early)
+		xmbuf_unmap_page(bp);
+}
+
 static struct cache_operations xmbuf_bcache_operations = {
 	.hash		= libxfs_bhash,
 	.alloc		= xmbuf_cache_alloc,
 	.flush		= xmbuf_cache_flush,
 	.relse		= xmbuf_cache_relse,
 	.compare	= libxfs_bcompare,
-	.bulkrelse	= xmbuf_cache_bulkrelse
+	.bulkrelse	= xmbuf_cache_bulkrelse,
+	.get		= xmbuf_cache_node_get,
+	.put		= xmbuf_cache_node_put,
 };
 
 /*
@@ -202,36 +327,6 @@ xmbuf_free(
 	pthread_mutex_destroy(&btp->lock);
 	xfile_destroy(btp->bt_xfile);
 	kfree(btp);
-}
-
-/* Directly map a memfd page into the buffer cache. */
-int
-xmbuf_map_page(
-	struct xfs_buf		*bp)
-{
-	struct xfile		*xfile = bp->b_target->bt_xfile;
-	void			*p;
-	loff_t			pos;
-
-	pos = xfile->partition_pos + BBTOB(xfs_buf_daddr(bp));
-	p = mmap(NULL, BBTOB(bp->b_length), PROT_READ | PROT_WRITE, MAP_SHARED,
-			xfile->fcb->fd, pos);
-	if (p == MAP_FAILED)
-		return -errno;
-
-	bp->b_addr = p;
-	bp->b_flags |= LIBXFS_B_UPTODATE | LIBXFS_B_UNCHECKED;
-	bp->b_error = 0;
-	return 0;
-}
-
-/* Unmap a memfd page that was mapped into the buffer cache. */
-void
-xmbuf_unmap_page(
-	struct xfs_buf		*bp)
-{
-	munmap(bp->b_addr, BBTOB(bp->b_length));
-	bp->b_addr = NULL;
 }
 
 /* Is this a valid daddr within the buftarg? */

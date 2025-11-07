@@ -247,6 +247,22 @@ undo_blocks:
 	return error;
 }
 
+static inline struct xfs_trans *
+__libxfs_trans_alloc(
+	struct xfs_mount	*mp,
+	uint			flags)
+{
+	struct xfs_trans	*tp;
+
+	tp = kmem_cache_zalloc(xfs_trans_cache, 0);
+	tp->t_mountp = mp;
+	INIT_LIST_HEAD(&tp->t_items);
+	INIT_LIST_HEAD(&tp->t_dfops);
+	tp->t_highest_agno = NULLAGNUMBER;
+
+	return tp;
+}
+
 int
 libxfs_trans_alloc(
 	struct xfs_mount	*mp,
@@ -257,14 +273,8 @@ libxfs_trans_alloc(
 	struct xfs_trans	**tpp)
 
 {
-	struct xfs_trans	*tp;
+	struct xfs_trans	*tp = __libxfs_trans_alloc(mp, flags);
 	int			error;
-
-	tp = kmem_cache_zalloc(xfs_trans_cache, 0);
-	tp->t_mountp = mp;
-	INIT_LIST_HEAD(&tp->t_items);
-	INIT_LIST_HEAD(&tp->t_dfops);
-	tp->t_highest_agno = NULLAGNUMBER;
 
 	error = xfs_trans_reserve(tp, resp, blocks, rtextents);
 	if (error) {
@@ -290,14 +300,11 @@ libxfs_trans_alloc(
  * Note the zero-length reservation; this transaction MUST be cancelled
  * without any dirty data.
  */
-int
+struct xfs_trans *
 libxfs_trans_alloc_empty(
-	struct xfs_mount		*mp,
-	struct xfs_trans		**tpp)
+	struct xfs_mount		*mp)
 {
-	struct xfs_trans_res		resv = {0};
-
-	return xfs_trans_alloc(mp, &resv, 0, 0, XFS_TRANS_NO_WRITECOUNT, tpp);
+	return __libxfs_trans_alloc(mp, XFS_TRANS_NO_WRITECOUNT);
 }
 
 /*
@@ -504,6 +511,35 @@ libxfs_trans_getsb(
 	}
 
 	bp = libxfs_getsb(mp);
+	if (bp == NULL)
+		return NULL;
+
+	_libxfs_trans_bjoin(tp, bp, 1);
+	trace_xfs_trans_getsb(bp->b_log_item);
+	return bp;
+}
+
+struct xfs_buf *
+libxfs_trans_getrtsb(
+	struct xfs_trans	*tp)
+{
+	struct xfs_mount	*mp = tp->t_mountp;
+	struct xfs_buf		*bp;
+	struct xfs_buf_log_item	*bip;
+	int			len = XFS_FSS_TO_BB(mp, 1);
+	DEFINE_SINGLE_BUF_MAP(map, XFS_SB_DADDR, len);
+
+	bp = xfs_trans_buf_item_match(tp, mp->m_rtdev, &map, 1);
+	if (bp != NULL) {
+		ASSERT(bp->b_transp == tp);
+		bip = bp->b_log_item;
+		ASSERT(bip != NULL);
+		bip->bli_recur++;
+		trace_xfs_trans_getsb_recur(bip);
+		return bp;
+	}
+
+	bp = libxfs_getrtsb(mp);
 	if (bp == NULL)
 		return NULL;
 
@@ -1173,12 +1209,51 @@ libxfs_trans_alloc_inode(
 	int			error;
 
 	error = libxfs_trans_alloc(mp, resv, dblocks,
-			xfs_rtb_to_rtx(mp, rblocks),
+			xfs_extlen_to_rtxlen(mp, rblocks),
 			force ? XFS_TRANS_RESERVE : 0, &tp);
 	if (error)
 		return error;
 
 	xfs_ilock(ip, XFS_ILOCK_EXCL);
+	xfs_trans_ijoin(tp, ip, 0);
+
+	*tpp = tp;
+	return 0;
+}
+
+/*
+ * Allocate an transaction, lock and join the directory and child inodes to it,
+ * and reserve quota for a directory update.  @resblks must point to the number
+ * of blocks to reserve; if not enough space is available, -ENOSPC will be
+ * returned.  @nospace_error is always set to zero here.  Userspace does not
+ * support reservationless creation at all, unlike the kernel.
+ *
+ * The ILOCKs will be dropped when the transaction is committed or cancelled.
+ *
+ * Caller is responsible for unlocking the inodes manually upon return
+ */
+int
+libxfs_trans_alloc_dir(
+	struct xfs_inode	*dp,
+	struct xfs_trans_res	*resv,
+	struct xfs_inode	*ip,
+	unsigned int		*resblks,
+	struct xfs_trans	**tpp,
+	int			*nospace_error)
+{
+	struct xfs_trans	*tp;
+	struct xfs_mount	*mp = ip->i_mount;
+	int			error;
+
+	*nospace_error = 0;
+
+	error = xfs_trans_alloc(mp, resv, *resblks, 0, 0, &tp);
+	if (error)
+		return error;
+
+	xfs_lock_two_inodes(dp, XFS_ILOCK_EXCL, ip, XFS_ILOCK_EXCL);
+
+	xfs_trans_ijoin(tp, dp, 0);
 	xfs_trans_ijoin(tp, ip, 0);
 
 	*tpp = tp;

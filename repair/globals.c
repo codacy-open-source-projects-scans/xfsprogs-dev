@@ -66,16 +66,13 @@ int	fs_is_dirty;
 int	need_root_inode;
 int	need_root_dotdot;
 
+bool	need_metadir_inode;
+int	need_metadir_dotdot;
+
 int	need_rbmino;
 int	need_rsumino;
 
 int	lost_quotas;
-int	have_uquotino;
-int	have_gquotino;
-int	have_pquotino;
-int	lost_uquotino;
-int	lost_gquotino;
-int	lost_pquotino;
 
 /* configuration vars -- fs geometry dependent */
 
@@ -83,12 +80,6 @@ int		inodes_per_block;
 unsigned int	glob_agcount;
 int		chunks_pblock;	/* # of 64-ino chunks per allocation */
 int		max_symlink_blocks;
-int64_t		fs_max_file_offset;
-
-/* realtime info */
-
-union xfs_rtword_raw	*btmcompute;
-union xfs_suminfo_raw	*sumcompute;
 
 /* inode tree records have full or partial backptr fields ? */
 
@@ -114,9 +105,6 @@ xfs_extlen_t	sb_inoalignmt;
 uint32_t	sb_unit;
 uint32_t	sb_width;
 
-struct aglock	*ag_locks;
-struct aglock	rt_lock;
-
 time_t		report_interval;
 uint64_t	*prog_rpt_done;
 
@@ -125,3 +113,114 @@ int		thread_count;
 
 /* If nonzero, simulate failure after this phase. */
 int		fail_after_phase;
+
+/*
+ * Do we think we're going to be so low on disk space that we need to pack
+ * all rebuilt btree blocks completely full to avoid running out of space?
+ */
+bool		need_packed_btrees;
+
+/* quota inode numbers */
+enum quotino_state {
+	QI_STATE_UNKNOWN,
+	QI_STATE_HAVE,
+	QI_STATE_LOST,
+};
+
+static xfs_ino_t quotinos[3] = { NULLFSINO, NULLFSINO, NULLFSINO };
+static enum quotino_state quotino_state[3];
+
+static inline unsigned int quotino_off(xfs_dqtype_t type)
+{
+	switch (type) {
+	case XFS_DQTYPE_USER:
+		return 0;
+	case XFS_DQTYPE_GROUP:
+		return 1;
+	case XFS_DQTYPE_PROJ:
+		return 2;
+	}
+
+	ASSERT(0);
+	return -1;
+}
+
+void
+set_quota_inode(
+	xfs_dqtype_t	type,
+	xfs_ino_t	ino)
+{
+	unsigned int	off = quotino_off(type);
+
+	quotinos[off] = ino;
+	quotino_state[off] = QI_STATE_HAVE;
+}
+
+void
+lose_quota_inode(
+	xfs_dqtype_t	type)
+{
+	unsigned int	off = quotino_off(type);
+
+	quotinos[off] = NULLFSINO;
+	quotino_state[off] = QI_STATE_LOST;
+}
+
+void
+clear_quota_inode(
+	xfs_dqtype_t	type)
+{
+	unsigned int	off = quotino_off(type);
+
+	quotinos[off] = NULLFSINO;
+	quotino_state[off] = QI_STATE_UNKNOWN;
+}
+
+xfs_ino_t
+get_quota_inode(
+	xfs_dqtype_t	type)
+{
+	unsigned int	off = quotino_off(type);
+
+	return quotinos[off];
+}
+
+bool
+is_quota_inode(
+	xfs_dqtype_t	type,
+	xfs_ino_t	ino)
+{
+	unsigned int	off = quotino_off(type);
+
+	return quotinos[off] == ino;
+}
+
+bool
+is_any_quota_inode(
+	xfs_ino_t		ino)
+{
+	unsigned int		i;
+
+	for(i = 0; i < ARRAY_SIZE(quotinos); i++)
+		if (quotinos[i] == ino)
+			return true;
+	return false;
+}
+
+bool
+lost_quota_inode(
+	xfs_dqtype_t	type)
+{
+	unsigned int	off = quotino_off(type);
+
+	return quotino_state[off] == QI_STATE_LOST;
+}
+
+bool
+has_quota_inode(
+	xfs_dqtype_t	type)
+{
+	unsigned int	off = quotino_off(type);
+
+	return quotino_state[off] == QI_STATE_HAVE;
+}

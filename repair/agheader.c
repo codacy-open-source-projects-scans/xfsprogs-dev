@@ -319,128 +319,71 @@ check_v5_feature_mismatch(
 	return XR_AG_SB_SEC;
 }
 
+static inline int
+require_zeroed_ino(
+	struct xfs_mount	*mp,
+	__be64			*inop,
+	const char		*tag,
+	xfs_agnumber_t		agno,
+	int			do_bzero)
+{
+	if (*inop == 0)
+		return 0;
+	if (!no_modify)
+		*inop = 0;
+	if (do_bzero)
+		return XR_AG_SB_SEC;
+
+	do_warn(_("non-zero %s inode field in superblock %d\n"),
+			tag, agno);
+	return XR_AG_SB;
+}
+
+/* With metadir, quota and rt metadata inums in the sb must all be zero. */
+static int
+check_pre_metadir_sb_inodes(
+	struct xfs_mount	*mp,
+	struct xfs_buf		*sbuf,
+	xfs_agnumber_t		agno,
+	int			do_bzero)
+{
+	struct xfs_dsb		*dsb = sbuf->b_addr;
+	int			rval = 0;
+
+	rval |= require_zeroed_ino(mp, &dsb->sb_uquotino,
+			_("user quota"), agno, do_bzero);
+	rval |= require_zeroed_ino(mp, &dsb->sb_gquotino,
+			_("group quota"), agno, do_bzero);
+	rval |= require_zeroed_ino(mp, &dsb->sb_pquotino,
+			_("project quota"), agno, do_bzero);
+
+	rval |= require_zeroed_ino(mp, &dsb->sb_rbmino,
+			_("realtime bitmap"), agno, do_bzero);
+	rval |= require_zeroed_ino(mp, &dsb->sb_rsumino,
+			_("realtime summary"), agno, do_bzero);
+	return rval;
+}
+
 /*
- * Possible fields that may have been set at mkfs time,
- * sb_inoalignmt, sb_unit, sb_width and sb_dirblklog.
- * The quota inode fields in the secondaries should be zero.
- * Likewise, the sb_flags and sb_shared_vn should also be
- * zero and the shared version bit should be cleared for
- * current mkfs's.
+ * quota inodes and flags in secondary superblocks are never set by mkfs.
+ * However, they could be set in a secondary if a fs with quotas was growfs'ed
+ * since growfs copies the new primary into the secondaries.
  *
- * And everything else in the buffer beyond either sb_width,
- * sb_dirblklog (v2 dirs), or sb_logsectsize can be zeroed.
- *
- * Note: contrary to the name, this routine is called for all
- * superblocks, not just the secondary superblocks.
+ * Also, the in-core inode flags now have different meaning to the on-disk
+ * flags, and so libxfs_sb_to_disk cannot directly write the
+ * sb_gquotino/sb_pquotino fields without specific sb_qflags being set.  Hence
+ * we need to zero those fields directly in the sb buffer here.
  */
 static int
-secondary_sb_whack(
-	struct xfs_mount *mp,
-	struct xfs_buf	*sbuf,
-	struct xfs_sb	*sb,
-	xfs_agnumber_t	i)
+secondary_sb_quota(
+	struct xfs_mount	*mp,
+	struct xfs_buf		*sbuf,
+	struct xfs_sb		*sb,
+	xfs_agnumber_t		i,
+	int			do_bzero)
 {
-	struct xfs_dsb	*dsb = sbuf->b_addr;
-	int		do_bzero = 0;
-	int		size;
-	char		*ip;
-	int		rval = 0;
-	uuid_t		tmpuuid;
-
-	rval = do_bzero = 0;
-
-	/*
-	 * Check for garbage beyond the last valid field.
-	 * Use field addresses instead so this code will still
-	 * work against older filesystems when the superblock
-	 * gets rev'ed again with new fields appended.
-	 *
-	 * size is the size of data which is valid for this sb.
-	 */
-	if (xfs_sb_version_hasmetauuid(sb))
-		size = offsetof(struct xfs_dsb, sb_meta_uuid)
-			+ sizeof(sb->sb_meta_uuid);
-	else if (xfs_sb_version_hascrc(sb))
-		size = offsetof(struct xfs_dsb, sb_lsn)
-			+ sizeof(sb->sb_lsn);
-	else if (xfs_sb_version_hasmorebits(sb))
-		size = offsetof(struct xfs_dsb, sb_bad_features2)
-			+ sizeof(sb->sb_bad_features2);
-	else if (xfs_sb_version_haslogv2(sb))
-		size = offsetof(struct xfs_dsb, sb_logsunit)
-			+ sizeof(sb->sb_logsunit);
-	else if (xfs_sb_version_hassector(sb))
-		size = offsetof(struct xfs_dsb, sb_logsectsize)
-			+ sizeof(sb->sb_logsectsize);
-	else /* only support dirv2 or more recent */
-		size = offsetof(struct xfs_dsb, sb_dirblklog)
-			+ sizeof(sb->sb_dirblklog);
-
-	/* Check the buffer we read from disk for garbage outside size */
-	for (ip = (char *)sbuf->b_addr + size;
-	     ip < (char *)sbuf->b_addr + mp->m_sb.sb_sectsize;
-	     ip++)  {
-		if (*ip)  {
-			do_bzero = 1;
-			break;
-		}
-	}
-	if (do_bzero)  {
-		rval |= XR_AG_SB_SEC;
-		if (!no_modify)  {
-			do_warn(
-	_("zeroing unused portion of %s superblock (AG #%u)\n"),
-				!i ? _("primary") : _("secondary"), i);
-			/*
-			 * zero both the in-memory sb and the disk buffer,
-			 * because the former was read from disk and
-			 * may contain newer version fields that shouldn't
-			 * be set, and the latter is never updated past
-			 * the last field - just zap them both.
-			 */
-			memcpy(&tmpuuid, &sb->sb_meta_uuid, sizeof(uuid_t));
-			memset((void *)((intptr_t)sb + size), 0,
-				mp->m_sb.sb_sectsize - size);
-			memset((char *)sbuf->b_addr + size, 0,
-				mp->m_sb.sb_sectsize - size);
-			/* Preserve meta_uuid so we don't fail uuid checks */
-			memcpy(&sb->sb_meta_uuid, &tmpuuid, sizeof(uuid_t));
-		} else
-			do_warn(
-	_("would zero unused portion of %s superblock (AG #%u)\n"),
-				!i ? _("primary") : _("secondary"), i);
-	}
-
-	/*
-	 * now look for the fields we can manipulate directly.
-	 * if we did a zero and that zero could have included
-	 * the field in question, just silently reset it.  otherwise,
-	 * complain.
-	 *
-	 * for now, just zero the flags field since only
-	 * the readonly flag is used
-	 */
-	if (sb->sb_flags)  {
-		if (!no_modify)
-			sb->sb_flags = 0;
-		if (!do_bzero)  {
-			rval |= XR_AG_SB;
-			do_warn(_("bad flags field in superblock %d\n"), i);
-		} else
-			rval |= XR_AG_SB_SEC;
-	}
-
-	/*
-	 * quota inodes and flags in secondary superblocks are never set by
-	 * mkfs.  However, they could be set in a secondary if a fs with quotas
-	 * was growfs'ed since growfs copies the new primary into the
-	 * secondaries.
-	 *
-	 * Also, the in-core inode flags now have different meaning to the
-	 * on-disk flags, and so libxfs_sb_to_disk cannot directly write the
-	 * sb_gquotino/sb_pquotino fields without specific sb_qflags being set.
-	 * Hence we need to zero those fields directly in the sb buffer here.
-	 */
+	struct xfs_dsb		*dsb = sbuf->b_addr;
+	int			rval = 0;
 
 	if (sb->sb_inprogress == 1 && sb->sb_uquotino != NULLFSINO)  {
 		if (!no_modify)
@@ -501,6 +444,122 @@ secondary_sb_whack(
 		} else
 			rval |= XR_AG_SB_SEC;
 	}
+
+	return rval;
+}
+
+/*
+ * Possible fields that may have been set at mkfs time,
+ * sb_inoalignmt, sb_unit, sb_width and sb_dirblklog.
+ * The quota inode fields in the secondaries should be zero.
+ * Likewise, the sb_flags and sb_shared_vn should also be
+ * zero and the shared version bit should be cleared for
+ * current mkfs's.
+ *
+ * And everything else in the buffer beyond either sb_width,
+ * sb_dirblklog (v2 dirs), or sb_logsectsize can be zeroed.
+ *
+ * Note: contrary to the name, this routine is called for all
+ * superblocks, not just the secondary superblocks.
+ */
+static int
+secondary_sb_whack(
+	struct xfs_mount *mp,
+	struct xfs_buf	*sbuf,
+	struct xfs_sb	*sb,
+	xfs_agnumber_t	i)
+{
+	int		do_bzero = 0;
+	int		size;
+	char		*ip;
+	int		rval = 0;
+	uuid_t		tmpuuid;
+
+	rval = do_bzero = 0;
+
+	/*
+	 * Check for garbage beyond the last valid field.
+	 * Use field addresses instead so this code will still
+	 * work against older filesystems when the superblock
+	 * gets rev'ed again with new fields appended.
+	 *
+	 * size is the size of data which is valid for this sb.
+	 */
+	if (xfs_sb_version_haszoned(sb))
+		size = offsetofend(struct xfs_dsb, sb_rtreserved);
+	else if (xfs_sb_version_hasmetadir(sb))
+		size = offsetofend(struct xfs_dsb, sb_pad);
+	else if (xfs_sb_version_hasmetauuid(sb))
+		size = offsetofend(struct xfs_dsb, sb_meta_uuid);
+	else if (xfs_sb_version_hascrc(sb))
+		size = offsetofend(struct xfs_dsb, sb_lsn);
+	else if (xfs_sb_version_hasmorebits(sb))
+		size = offsetofend(struct xfs_dsb, sb_bad_features2);
+	else if (xfs_sb_version_haslogv2(sb))
+		size = offsetofend(struct xfs_dsb, sb_logsunit);
+	else if (xfs_sb_version_hassector(sb))
+		size = offsetofend(struct xfs_dsb, sb_logsectsize);
+	else /* only support dirv2 or more recent */
+		size = offsetofend(struct xfs_dsb, sb_dirblklog);
+
+	/* Check the buffer we read from disk for garbage outside size */
+	for (ip = (char *)sbuf->b_addr + size;
+	     ip < (char *)sbuf->b_addr + mp->m_sb.sb_sectsize;
+	     ip++)  {
+		if (*ip)  {
+			do_bzero = 1;
+			break;
+		}
+	}
+	if (do_bzero)  {
+		rval |= XR_AG_SB_SEC;
+		if (!no_modify)  {
+			do_warn(
+	_("zeroing unused portion of %s superblock (AG #%u)\n"),
+				!i ? _("primary") : _("secondary"), i);
+			/*
+			 * zero both the in-memory sb and the disk buffer,
+			 * because the former was read from disk and
+			 * may contain newer version fields that shouldn't
+			 * be set, and the latter is never updated past
+			 * the last field - just zap them both.
+			 */
+			memcpy(&tmpuuid, &sb->sb_meta_uuid, sizeof(uuid_t));
+			memset((void *)((intptr_t)sb + size), 0,
+				mp->m_sb.sb_sectsize - size);
+			memset((char *)sbuf->b_addr + size, 0,
+				mp->m_sb.sb_sectsize - size);
+			/* Preserve meta_uuid so we don't fail uuid checks */
+			memcpy(&sb->sb_meta_uuid, &tmpuuid, sizeof(uuid_t));
+		} else
+			do_warn(
+	_("would zero unused portion of %s superblock (AG #%u)\n"),
+				!i ? _("primary") : _("secondary"), i);
+	}
+
+	/*
+	 * now look for the fields we can manipulate directly.
+	 * if we did a zero and that zero could have included
+	 * the field in question, just silently reset it.  otherwise,
+	 * complain.
+	 *
+	 * for now, just zero the flags field since only
+	 * the readonly flag is used
+	 */
+	if (sb->sb_flags)  {
+		if (!no_modify)
+			sb->sb_flags = 0;
+		if (!do_bzero)  {
+			rval |= XR_AG_SB;
+			do_warn(_("bad flags field in superblock %d\n"), i);
+		} else
+			rval |= XR_AG_SB_SEC;
+	}
+
+	if (xfs_has_metadir(mp))
+		rval |= check_pre_metadir_sb_inodes(mp, sbuf, i, do_bzero);
+	else
+		rval |= secondary_sb_quota(mp, sbuf, sb, i, do_bzero);
 
 	/*
 	 * if the secondaries agree on a stripe unit/width or inode
@@ -632,7 +691,8 @@ verify_set_agheader(xfs_mount_t *mp, struct xfs_buf *sbuf, xfs_sb_t *sb,
 			sb->sb_fdblocks = 0;
 			sb->sb_frextents = 0;
 
-			sb->sb_qflags = 0;
+			if (!xfs_has_metadir(mp))
+				sb->sb_qflags = 0;
 		}
 
 		rval |= XR_AG_SB;

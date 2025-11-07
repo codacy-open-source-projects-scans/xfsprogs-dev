@@ -208,6 +208,7 @@ libxfs_buf_read(
 
 int libxfs_readbuf_verify(struct xfs_buf *bp, const struct xfs_buf_ops *ops);
 struct xfs_buf *libxfs_getsb(struct xfs_mount *mp);
+struct xfs_buf *libxfs_getrtsb(struct xfs_mount *mp);
 extern void	libxfs_bcache_purge(struct xfs_mount *mp);
 extern void	libxfs_bcache_free(void);
 extern void	libxfs_bcache_flush(struct xfs_mount *mp);
@@ -253,7 +254,7 @@ xfs_buf_hold(struct xfs_buf *bp)
 void xfs_buf_lock(struct xfs_buf *bp);
 void xfs_buf_unlock(struct xfs_buf *bp);
 
-int libxfs_buf_get_uncached(struct xfs_buftarg *targ, size_t bblen, int flags,
+int libxfs_buf_get_uncached(struct xfs_buftarg *targ, size_t bblen,
 		struct xfs_buf **bpp);
 int libxfs_buf_read_uncached(struct xfs_buftarg *targ, xfs_daddr_t daddr,
 		size_t bblen, int flags, struct xfs_buf **bpp,

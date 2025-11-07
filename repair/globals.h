@@ -107,16 +107,13 @@ extern int		fs_is_dirty;
 extern int		need_root_inode;
 extern int		need_root_dotdot;
 
+extern bool		need_metadir_inode;
+extern int		need_metadir_dotdot;
+
 extern int		need_rbmino;
 extern int		need_rsumino;
 
 extern int		lost_quotas;
-extern int		have_uquotino;
-extern int		have_gquotino;
-extern int		have_pquotino;
-extern int		lost_uquotino;
-extern int		lost_gquotino;
-extern int		lost_pquotino;
 
 /* configuration vars -- fs geometry dependent */
 
@@ -124,12 +121,6 @@ extern int		inodes_per_block;
 extern unsigned int	glob_agcount;
 extern int		chunks_pblock;	/* # of 64-ino chunks per allocation */
 extern int		max_symlink_blocks;
-extern int64_t		fs_max_file_offset;
-
-/* realtime info */
-
-extern union xfs_rtword_raw		*btmcompute;
-extern union xfs_suminfo_raw		*sumcompute;
 
 /* inode tree records have full or partial backptr fields ? */
 
@@ -155,11 +146,7 @@ extern xfs_extlen_t	sb_inoalignmt;
 extern uint32_t	sb_unit;
 extern uint32_t	sb_width;
 
-struct aglock {
-	pthread_mutex_t	lock __attribute__((__aligned__(64)));
-};
-extern struct aglock	*ag_locks;
-extern struct aglock	rt_lock;
+extern pthread_mutex_t	rt_lock;
 
 extern time_t		report_interval;
 extern uint64_t		*prog_rpt_done;
@@ -171,5 +158,16 @@ extern int		thread_count;
 extern int		fail_after_phase;
 
 extern struct libxfs_init x;
+
+extern bool		need_packed_btrees;
+
+void set_quota_inode(xfs_dqtype_t type, xfs_ino_t);
+void lose_quota_inode(xfs_dqtype_t type);
+void clear_quota_inode(xfs_dqtype_t type);
+xfs_ino_t get_quota_inode(xfs_dqtype_t type);
+bool is_quota_inode(xfs_dqtype_t type, xfs_ino_t ino);
+bool is_any_quota_inode(xfs_ino_t ino);
+bool lost_quota_inode(xfs_dqtype_t type);
+bool has_quota_inode(xfs_dqtype_t type);
 
 #endif /* _XFS_REPAIR_GLOBAL_H */

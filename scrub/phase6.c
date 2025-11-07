@@ -44,6 +44,9 @@ struct media_verify_state {
 	struct read_verify_pool	*rvp_realtime;
 	struct bitmap		*d_bad;		/* bytes */
 	struct bitmap		*r_bad;		/* bytes */
+	bool			d_trunc:1;
+	bool			r_trunc:1;
+	bool			l_trunc:1;
 };
 
 /* Find the fd for a given device identifier. */
@@ -53,12 +56,21 @@ dev_to_pool(
 	struct media_verify_state	*vs,
 	dev_t				dev)
 {
-	if (dev == ctx->fsinfo.fs_datadev)
-		return vs->rvp_data;
-	else if (dev == ctx->fsinfo.fs_logdev)
-		return vs->rvp_log;
-	else if (dev == ctx->fsinfo.fs_rtdev)
-		return vs->rvp_realtime;
+	if (ctx->mnt.fsgeom.rtstart) {
+		if (dev == XFS_DEV_DATA)
+			return vs->rvp_data;
+		if (dev == XFS_DEV_LOG)
+			return vs->rvp_log;
+		if (dev == XFS_DEV_RT)
+			return vs->rvp_realtime;
+	} else {
+		if (dev == ctx->fsinfo.fs_datadev)
+			return vs->rvp_data;
+		if (dev == ctx->fsinfo.fs_logdev)
+			return vs->rvp_log;
+		if (dev == ctx->fsinfo.fs_rtdev)
+			return vs->rvp_realtime;
+	}
 	abort();
 }
 
@@ -68,12 +80,21 @@ disk_to_dev(
 	struct scrub_ctx	*ctx,
 	struct disk		*disk)
 {
-	if (disk == ctx->datadev)
-		return ctx->fsinfo.fs_datadev;
-	else if (disk == ctx->logdev)
-		return ctx->fsinfo.fs_logdev;
-	else if (disk == ctx->rtdev)
-		return ctx->fsinfo.fs_rtdev;
+	if (ctx->mnt.fsgeom.rtstart) {
+		if (disk == ctx->datadev)
+			return XFS_DEV_DATA;
+		if (disk == ctx->logdev)
+			return XFS_DEV_LOG;
+		if (disk == ctx->rtdev)
+			return XFS_DEV_RT;
+	} else {
+		if (disk == ctx->datadev)
+			return ctx->fsinfo.fs_datadev;
+		if (disk == ctx->logdev)
+			return ctx->fsinfo.fs_logdev;
+		if (disk == ctx->rtdev)
+			return ctx->fsinfo.fs_rtdev;
+	}
 	abort();
 }
 
@@ -84,11 +105,9 @@ bitmap_for_disk(
 	struct disk			*disk,
 	struct media_verify_state	*vs)
 {
-	dev_t				dev = disk_to_dev(ctx, disk);
-
-	if (dev == ctx->fsinfo.fs_datadev)
+	if (disk == ctx->datadev)
 		return vs->d_bad;
-	else if (dev == ctx->fsinfo.fs_rtdev)
+	if (disk == ctx->rtdev)
 		return vs->r_bad;
 	return NULL;
 }
@@ -492,25 +511,21 @@ report_ioerr(
 	uint64_t			length,
 	void				*arg)
 {
-	struct fsmap			keys[2];
+	struct fsmap			keys[2] = { };
 	struct ioerr_filerange		fr = {
 		.physical		= start,
 		.length			= length,
 	};
 	struct disk_ioerr_report	*dioerr = arg;
-	dev_t				dev;
-
-	dev = disk_to_dev(dioerr->ctx, dioerr->disk);
 
 	/* Go figure out which blocks are bad from the fsmap. */
-	memset(keys, 0, sizeof(struct fsmap) * 2);
-	keys->fmr_device = dev;
-	keys->fmr_physical = start;
-	(keys + 1)->fmr_device = dev;
-	(keys + 1)->fmr_physical = start + length - 1;
-	(keys + 1)->fmr_owner = ULLONG_MAX;
-	(keys + 1)->fmr_offset = ULLONG_MAX;
-	(keys + 1)->fmr_flags = UINT_MAX;
+	keys[0].fmr_device = disk_to_dev(dioerr->ctx, dioerr->disk);
+	keys[0].fmr_physical = start;
+	keys[1].fmr_device = keys[0].fmr_device;
+	keys[1].fmr_physical = start + length - 1;
+	keys[1].fmr_owner = ULLONG_MAX;
+	keys[1].fmr_offset = ULLONG_MAX;
+	keys[1].fmr_flags = UINT_MAX;
 	return -scrub_iterate_fsmap(dioerr->ctx, keys, report_ioerr_fsmap,
 			&fr);
 }
@@ -544,6 +559,13 @@ report_all_media_errors(
 {
 	int				ret;
 
+	if (vs->d_trunc)
+		str_corrupt(ctx, ctx->mntpoint, _("data device truncated"));
+	if (vs->l_trunc)
+		str_corrupt(ctx, ctx->mntpoint, _("log device truncated"));
+	if (vs->r_trunc)
+		str_corrupt(ctx, ctx->mntpoint, _("rt device truncated"));
+
 	ret = report_disk_ioerrs(ctx, ctx->datadev, vs);
 	if (ret) {
 		str_liberror(ctx, ret, _("walking datadev io errors"));
@@ -558,17 +580,19 @@ report_all_media_errors(
 
 	/*
 	 * Scan the directory tree to get file paths if we didn't already use
-	 * directory parent pointers to report the loss.
+	 * directory parent pointers to report the loss.  If parent pointers
+	 * are enabled, report_ioerr_fsmap will have already reported file
+	 * paths that have lost file data and xattrs.
 	 */
-	if (!can_use_pptrs(ctx)) {
-		ret = scan_fs_tree(ctx, report_dir_loss, report_dirent_loss,
-				vs);
-		if (ret)
-			return ret;
-	}
+	if (can_use_pptrs(ctx))
+		return 0;
+
+	ret = scan_fs_tree(ctx, report_dir_loss, report_dirent_loss, vs);
+	if (ret)
+		return ret;
 
 	/* Scan for unlinked files. */
-	return scrub_scan_all_inodes(ctx, report_inode_loss, vs);
+	return scrub_scan_user_files(ctx, report_inode_loss, vs);
 }
 
 /* Schedule a read-verify of a (data block) extent. */
@@ -662,6 +686,16 @@ remember_ioerr(
 	struct media_verify_state	*vs = arg;
 	struct bitmap			*tree;
 	int				ret;
+
+	if (!length) {
+		if (disk == ctx->datadev)
+			vs->d_trunc = true;
+		else if (disk == ctx->logdev)
+			vs->l_trunc = true;
+		else if (disk == ctx->rtdev)
+			vs->r_trunc = true;
+		return;
+	}
 
 	tree = bitmap_for_disk(ctx, disk, vs);
 	if (!tree) {

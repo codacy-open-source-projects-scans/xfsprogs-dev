@@ -1,9 +1,18 @@
-AC_INIT([xfsprogs],[6.11.0],[linux-xfs@vger.kernel.org])
+AC_INIT([xfsprogs],[6.17.0],[linux-xfs@vger.kernel.org])
 AC_PREREQ([2.69])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([include/libxfs.h])
 AC_PREFIX_DEFAULT(/usr)
+AC_SUBST(PACKAGE_BUGREPORT)
+
+# Default CFLAGS if nobody specifies anything else
+if test "${CFLAGS+set}" != "set"; then
+	CFLAGS="-g -O2 -std=gnu11"
+fi
+if test "${CXXFLAGS+set}" != "set"; then
+	CXXFLAGS="-g -O2 -std=gnu++11"
+fi
 
 AC_PROG_INSTALL
 LT_INIT
@@ -22,9 +31,12 @@ if test "${BUILD_CFLAGS+set}" != "set"; then
   if test $cross_compiling = no; then
     BUILD_CFLAGS="$CFLAGS"
   else
-    BUILD_CFLAGS="-g -O2"
+    BUILD_CFLAGS="-g -O2 -std=gnu11"
   fi
 fi
+
+AC_PROG_CXX
+# no C++ build tools yet
 
 AC_ARG_ENABLE(shared,
 [  --enable-shared=[yes/no]  Enable use of shared libraries [default=yes]],,
@@ -118,7 +130,7 @@ test -n "$multiarch" && enable_lib64=no
 # to "find" is required, to avoid including such directories in the
 # list.
 LOCALIZED_FILES=""
-for lfile in `find ${srcdir} -path './.??*' -prune -o -name '*.c' -type f -print || exit 1`; do
+for lfile in `find ${srcdir} -path './.??*' -prune -o -name '*.c' -print -o -name '*.py.in' -print || exit 1`; do
     LOCALIZED_FILES="$LOCALIZED_FILES \$(TOPDIR)/$lfile"
 done
 AC_SUBST(LOCALIZED_FILES)
@@ -143,9 +155,12 @@ AC_PACKAGE_NEED_RCU_INIT
 
 AC_HAVE_PWRITEV2
 AC_HAVE_COPY_FILE_RANGE
+AC_HAVE_CACHESTAT
+AC_HAVE_FILE_GETATTR
 AC_NEED_INTERNAL_FSXATTR
 AC_NEED_INTERNAL_FSCRYPT_ADD_KEY_ARG
 AC_NEED_INTERNAL_FSCRYPT_POLICY_V2
+AC_NEED_INTERNAL_STATX
 AC_HAVE_GETFSMAP
 AC_HAVE_MAP_SYNC
 AC_HAVE_DEVMAPPER
@@ -165,6 +180,8 @@ AC_CONFIG_SYSTEMD_SYSTEM_UNIT_DIR
 AC_CONFIG_CROND_DIR
 AC_CONFIG_UDEV_RULE_DIR
 AC_HAVE_BLKID_TOPO
+AC_HAVE_TRIVIAL_AUTO_VAR_INIT
+AC_STRERROR_R_RETURNS_STRING
 
 if test "$enable_ubsan" = "yes" || test "$enable_ubsan" = "probe"; then
         AC_PACKAGE_CHECK_UBSAN

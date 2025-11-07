@@ -31,6 +31,9 @@
 #define IO_PATH		(1<<10)
 #define IO_NOFOLLOW	(1<<11)
 
+/* undergoing atomic update, do not close */
+#define IO_ATOMICUPDATE	(1<<12)
+
 /*
  * Regular file I/O control
  */
@@ -74,7 +77,8 @@ extern int		openfile(char *, struct xfs_fsop_geom *, int, mode_t,
 				 struct fs_path *);
 extern int		addfile(char *, int , struct xfs_fsop_geom *, int,
 				struct fs_path *);
-extern void		printxattr(uint, int, int, const char *, int, int);
+extern int		closefile(void);
+extern void		print_xflags(uint, int, int, const char *, int, int);
 
 extern unsigned int	recurse_all;
 extern unsigned int	recurse_dir;
@@ -128,6 +132,12 @@ extern void		copy_range_init(void);
 #define copy_range_init()	do { } while (0)
 #endif
 
+#ifdef HAVE_CACHESTAT
+extern void cachestat_init(void);
+#else
+#define cachestat_init() do { } while (0)
+#endif
+
 extern void		sync_range_init(void);
 extern void		readdir_init(void);
 extern void		reflink_init(void);
@@ -151,3 +161,4 @@ extern void		crc32cselftest_init(void);
 extern void		bulkstat_init(void);
 void			exchangerange_init(void);
 void			fsprops_init(void);
+void			aginfo_init(void);
