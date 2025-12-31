@@ -401,7 +401,7 @@ within_range(
 /*
  * Render an inode number into a buffer in a format suitable for use in
  * log messages. The buffer will be filled with:
- * 	"inode <inode number> (<ag number>/<ag inode number>)"
+ *	"inode <inode number> (<ag number>/<ag inode number>)"
  * If the @format argument is non-NULL, it will be rendered into the buffer
  * after the inode representation and a single space.
  */
@@ -503,8 +503,11 @@ report_inum:
 	pathlen = ret;
 
 report_format:
-	va_start(args, format);
-	pathlen += vsnprintf(buf + pathlen, buflen - pathlen, format, args);
-	va_end(args);
+	if (format) {
+		va_start(args, format);
+		pathlen += vsnprintf(buf + pathlen, buflen - pathlen, format,
+				args);
+		va_end(args);
+	}
 	return pathlen;
 }

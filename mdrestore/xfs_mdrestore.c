@@ -437,7 +437,7 @@ restore_v2(
 	if (fread(&xme, sizeof(xme), 1, md_fp) != 1)
 		fatal("error reading from metadump file\n");
 
-	if (xme.xme_addr != 0 || xme.xme_len == 1 ||
+	if (xme.xme_addr != 0 || be32_to_cpu(xme.xme_len) != 1 ||
 	    (be64_to_cpu(xme.xme_addr) & XME_ADDR_DEVICE_MASK) !=
 			XME_ADDR_DATA_DEVICE)
 		fatal("Invalid superblock disk address/length\n");

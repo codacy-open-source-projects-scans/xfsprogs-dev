@@ -50,7 +50,7 @@ typedef struct xfs_buf_log_item {
 	struct xfs_buf		*bli_buf;	/* real buffer pointer */
 	unsigned int		bli_flags;	/* misc flags */
 	unsigned int		bli_recur;	/* recursion count */
-	xfs_buf_log_format_t	__bli_format;	/* in-log header */
+	struct xfs_buf_log_format	__bli_format;	/* in-log header */
 } xfs_buf_log_item_t;
 
 #define XFS_BLI_DIRTY			(1<<0)
@@ -58,12 +58,6 @@ typedef struct xfs_buf_log_item {
 #define XFS_BLI_STALE			(1<<2)
 #define XFS_BLI_INODE_ALLOC_BUF		(1<<3)
 #define XFS_BLI_ORDERED			(1<<4)
-
-typedef struct xfs_qoff_logitem {
-	xfs_log_item_t		qql_item;	/* common portion */
-	struct xfs_qoff_logitem	*qql_start_lip;	/* qoff-start logitem, if any */
-	xfs_qoff_logformat_t	qql_format;	/* logged structure */
-} xfs_qoff_logitem_t;
 
 typedef struct xfs_trans {
 	unsigned int		t_log_res;	/* amt of log space resvd */

@@ -225,25 +225,6 @@ int		count_bcnt_extents(xfs_agnumber_t);
  * inode definitions
  */
 
-/* inode types */
-
-#define XR_INO_UNKNOWN	0		/* unknown */
-#define XR_INO_DIR	1		/* directory */
-#define XR_INO_RTDATA	2		/* realtime file */
-#define XR_INO_RTBITMAP	3		/* realtime bitmap inode */
-#define XR_INO_RTSUM	4		/* realtime summary inode */
-#define XR_INO_DATA	5		/* regular file */
-#define XR_INO_SYMLINK	6		/* symlink */
-#define XR_INO_CHRDEV	7		/* character device */
-#define XR_INO_BLKDEV	8		/* block device */
-#define XR_INO_SOCK	9		/* socket */
-#define XR_INO_FIFO	10		/* fifo */
-#define XR_INO_UQUOTA	12		/* user quota inode */
-#define XR_INO_GQUOTA	13		/* group quota inode */
-#define XR_INO_PQUOTA	14		/* project quota inode */
-#define XR_INO_RTRMAP	15		/* realtime rmap */
-#define XR_INO_RTREFC	16		/* realtime refcount */
-
 /* inode allocation tree */
 
 /*

@@ -19,7 +19,7 @@ xfs_efi_copy_format(
 	int			  continued)
 {
 	uint i;
-	uint nextents = ((xfs_efi_log_format_t *)buf)->efi_nextents;
+	uint nextents = ((struct xfs_efi_log_format *)buf)->efi_nextents;
 	uint dst_len = xfs_efi_log_format_sizeof(nextents);
 	uint len32 = xfs_efi_log_format32_sizeof(nextents);
 	uint len64 = xfs_efi_log_format64_sizeof(nextents);
@@ -28,7 +28,8 @@ xfs_efi_copy_format(
 		memcpy((char *)dst_efi_fmt, buf, len);
 		return 0;
 	} else if (len == len32) {
-		xfs_efi_log_format_32_t *src_efi_fmt_32 = (xfs_efi_log_format_32_t *)buf;
+		struct xfs_efi_log_format_32 *src_efi_fmt_32 =
+			(struct xfs_efi_log_format_32 *)buf;
 
 		dst_efi_fmt->efi_type	 = src_efi_fmt_32->efi_type;
 		dst_efi_fmt->efi_size	 = src_efi_fmt_32->efi_size;
@@ -42,7 +43,8 @@ xfs_efi_copy_format(
 		}
 		return 0;
 	} else if (len == len64) {
-		xfs_efi_log_format_64_t *src_efi_fmt_64 = (xfs_efi_log_format_64_t *)buf;
+		struct xfs_efi_log_format_64 *src_efi_fmt_64 =
+			(struct xfs_efi_log_format_64 *)buf;
 
 		dst_efi_fmt->efi_type	 = src_efi_fmt_64->efi_type;
 		dst_efi_fmt->efi_size	 = src_efi_fmt_64->efi_size;
@@ -63,23 +65,24 @@ xfs_efi_copy_format(
 
 int
 xlog_print_trans_efi(
-	char			**ptr,
-	uint			src_len,
-	int			continued)
+	char				**ptr,
+	uint				src_len,
+	int				continued)
 {
-	const char		*item_name = "EFI?";
-	xfs_efi_log_format_t	*src_f, *f = NULL;
-	uint			dst_len;
-	xfs_extent_t		*ex;
-	int			i;
-	int			error = 0;
-	int			core_size = offsetof(xfs_efi_log_format_t, efi_extents);
+	const char			*item_name = "EFI?";
+	struct xfs_efi_log_format	*src_f, *f = NULL;
+	uint				dst_len;
+	struct xfs_extent		*ex;
+	int				i;
+	int				error = 0;
+	int				core_size = offsetof(
+			struct xfs_efi_log_format, efi_extents);
 
 	/*
 	 * memmove to ensure 8-byte alignment for the long longs in
-	 * xfs_efi_log_format_t structure
+	 * xfs_efi_log_format structure
 	 */
-	if ((src_f = (xfs_efi_log_format_t *)malloc(src_len)) == NULL) {
+	if ((src_f = (struct xfs_efi_log_format *)malloc(src_len)) == NULL) {
 		fprintf(stderr, _("%s: xlog_print_trans_efi: malloc failed\n"), progname);
 		exit(1);
 	}
@@ -95,7 +98,7 @@ xlog_print_trans_efi(
 		goto error;
 	}
 
-	if ((f = (xfs_efi_log_format_t *)malloc(dst_len)) == NULL) {
+	if ((f = (struct xfs_efi_log_format *)malloc(dst_len)) == NULL) {
 		fprintf(stderr, _("%s: xlog_print_trans_efi: malloc failed\n"), progname);
 		exit(1);
 	}
@@ -135,15 +138,15 @@ error:
 
 void
 xlog_recover_print_efi(
-	struct xlog_recover_item *item)
+	struct xlog_recover_item	*item)
 {
-	const char		*item_name = "EFI?";
-	xfs_efi_log_format_t	*f, *src_f;
-	xfs_extent_t		*ex;
-	int			i;
-	uint			src_len, dst_len;
+	const char			*item_name = "EFI?";
+	struct xfs_efi_log_format	*f, *src_f;
+	struct xfs_extent		*ex;
+	int				i;
+	uint				src_len, dst_len;
 
-	src_f = (xfs_efi_log_format_t *)item->ri_buf[0].iov_base;
+	src_f = (struct xfs_efi_log_format *)item->ri_buf[0].iov_base;
 	src_len = item->ri_buf[0].iov_len;
 	/*
 	 * An xfs_efi_log_format structure contains a variable length array
@@ -151,9 +154,9 @@ xlog_recover_print_efi(
 	 * Each element is of size xfs_extent_32_t or xfs_extent_64_t.
 	 * Need to convert to native format.
 	 */
-	dst_len = sizeof(xfs_efi_log_format_t) +
-		(src_f->efi_nextents) * sizeof(xfs_extent_t);
-	if ((f = (xfs_efi_log_format_t *)malloc(dst_len)) == NULL) {
+	dst_len = sizeof(struct xfs_efi_log_format) +
+		(src_f->efi_nextents) * sizeof(struct xfs_extent);
+	if ((f = (struct xfs_efi_log_format *)malloc(dst_len)) == NULL) {
 		fprintf(stderr, _("%s: xlog_recover_print_efi: malloc failed\n"),
 			progname);
 		exit(1);
@@ -186,18 +189,20 @@ xlog_recover_print_efi(
 }
 
 int
-xlog_print_trans_efd(char **ptr, uint len)
+xlog_print_trans_efd(
+	char				**ptr,
+	uint				len)
 {
-	const char		*item_name = "EFD?";
-	xfs_efd_log_format_t	*f;
-	xfs_efd_log_format_t	lbuf;
+	const char			*item_name = "EFD?";
+	struct xfs_efd_log_format	*f;
+	struct xfs_efd_log_format	lbuf;
 
 	/* size without extents at end */
-	uint core_size = sizeof(xfs_efd_log_format_t);
+	uint core_size = sizeof(struct xfs_efd_log_format);
 
 	/*
 	 * memmove to ensure 8-byte alignment for the long longs in
-	 * xfs_efd_log_format_t structure
+	 * xfs_efd_log_format structure
 	 */
 	memmove(&lbuf, *ptr, min(core_size, len));
 	f = &lbuf;
@@ -224,12 +229,12 @@ xlog_print_trans_efd(char **ptr, uint len)
 
 void
 xlog_recover_print_efd(
-	struct xlog_recover_item *item)
+	struct xlog_recover_item	*item)
 {
-	const char		*item_name = "EFD?";
-	xfs_efd_log_format_t	*f;
+	const char			*item_name = "EFD?";
+	struct xfs_efd_log_format	*f;
 
-	f = (xfs_efd_log_format_t *)item->ri_buf[0].iov_base;
+	f = (struct xfs_efd_log_format *)item->ri_buf[0].iov_base;
 
 	switch (f->efd_type) {
 	case XFS_LI_EFD:	item_name = "EFD"; break;
@@ -375,7 +380,7 @@ xlog_print_trans_rud(
 
 	/*
 	 * memmove to ensure 8-byte alignment for the long longs in
-	 * xfs_efd_log_format_t structure
+	 * xfs_rud_log_format structure
 	 */
 	memmove(&lbuf, *ptr, min(core_size, len));
 	f = &lbuf;
@@ -793,7 +798,7 @@ xlog_print_trans_attri(
 	int				*i)
 {
 	struct xfs_attri_log_format	*src_f = NULL;
-	xlog_op_header_t		*head = NULL;
+	struct xlog_op_header		*head = NULL;
 	void				*name_ptr = NULL;
 	void				*new_name_ptr = NULL;
 	void				*value_ptr = NULL;
@@ -850,7 +855,7 @@ xlog_print_trans_attri(
 	if (name_len > 0) {
 		printf(_("\n"));
 		(*i)++;
-		head = (xlog_op_header_t *)*ptr;
+		head = (struct xlog_op_header *)*ptr;
 		xlog_print_op_header(head, *i, ptr);
 		name_ptr = *ptr;
 		error = xlog_print_trans_attri_name(ptr,
@@ -862,7 +867,7 @@ xlog_print_trans_attri(
 	if (new_name_len > 0) {
 		printf(_("\n"));
 		(*i)++;
-		head = (xlog_op_header_t *)*ptr;
+		head = (struct xlog_op_header *)*ptr;
 		xlog_print_op_header(head, *i, ptr);
 		new_name_ptr = *ptr;
 		error = xlog_print_trans_attri_name(ptr,
@@ -874,7 +879,7 @@ xlog_print_trans_attri(
 	if (value_len > 0) {
 		printf(_("\n"));
 		(*i)++;
-		head = (xlog_op_header_t *)*ptr;
+		head = (struct xlog_op_header *)*ptr;
 		xlog_print_op_header(head, *i, ptr);
 		value_ptr = *ptr;
 		error = xlog_print_trans_attri_value(ptr,
@@ -886,7 +891,7 @@ xlog_print_trans_attri(
 	if (new_value_len > 0) {
 		printf(_("\n"));
 		(*i)++;
-		head = (xlog_op_header_t *)*ptr;
+		head = (struct xlog_op_header *)*ptr;
 		xlog_print_op_header(head, *i, ptr);
 		new_value_ptr = *ptr;
 		error = xlog_print_trans_attri_value(ptr,

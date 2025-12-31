@@ -25,11 +25,8 @@ struct fs_topology {
 	struct device_topology	log;
 };
 
-void
-get_topology(
-	struct libxfs_init	*xi,
-	struct fs_topology	*ft,
-	int			force_overwrite);
+void libxfs_get_topology(struct libxfs_init *xi, struct fs_topology *ft,
+		bool force_overwrite);
 
 extern void
 calc_default_ag_geometry(

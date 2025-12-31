@@ -72,13 +72,13 @@ xlog_recover_print_buffer(
 {
 	xfs_agi_t		*agi;
 	xfs_agf_t		*agf;
-	xfs_buf_log_format_t	*f;
+	struct xfs_buf_log_format	*f;
 	char			*p;
 	int			len, num, i;
 	xfs_daddr_t		blkno;
 	struct xfs_disk_dquot	*ddq;
 
-	f = (xfs_buf_log_format_t *)item->ri_buf[0].iov_base;
+	f = (struct xfs_buf_log_format*)item->ri_buf[0].iov_base;
 	printf("	");
 	ASSERT(f->blf_type == XFS_LI_BUF);
 	printf(_("BUF:  #regs:%d   start blkno:0x%llx   len:%d   bmap size:%d   flags:0x%x\n"),
@@ -181,11 +181,11 @@ xlog_recover_print_buffer(
 
 STATIC void
 xlog_recover_print_quotaoff(
-	struct xlog_recover_item *item)
+	struct xlog_recover_item	*item)
 {
-	xfs_qoff_logformat_t	*qoff_f;
+	struct xfs_qoff_logformat	*qoff_f;
 
-	qoff_f = (xfs_qoff_logformat_t *)item->ri_buf[0].iov_base;
+	qoff_f = (struct xfs_qoff_logformat *)item->ri_buf[0].iov_base;
 
 	ASSERT(qoff_f);
 	printf(_("\tQUOTAOFF: #regs:%d   type:"), qoff_f->qf_size);
@@ -202,10 +202,10 @@ STATIC void
 xlog_recover_print_dquot(
 	struct xlog_recover_item *item)
 {
-	xfs_dq_logformat_t	*f;
+	struct xfs_dq_logformat	*f;
 	struct xfs_disk_dquot	*d;
 
-	f = (xfs_dq_logformat_t *)item->ri_buf[0].iov_base;
+	f = (struct xfs_dq_logformat *)item->ri_buf[0].iov_base;
 	ASSERT(f);
 	ASSERT(f->qlf_len == 1);
 	d = (struct xfs_disk_dquot *)item->ri_buf[1].iov_base;

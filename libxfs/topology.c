@@ -224,7 +224,7 @@ static void
 blkid_get_topology(
 	const char		*device,
 	struct device_topology	*dt,
-	int			force_overwrite)
+	bool			force_overwrite)
 {
 	blkid_topology tp;
 	blkid_probe pr;
@@ -317,7 +317,7 @@ static void
 get_device_topology(
 	struct libxfs_dev	*dev,
 	struct device_topology	*dt,
-	int			force_overwrite)
+	bool			force_overwrite)
 {
 	struct stat		st;
 
@@ -364,11 +364,12 @@ get_device_topology(
 }
 
 void
-get_topology(
+libxfs_get_topology(
 	struct libxfs_init	*xi,
 	struct fs_topology	*ft,
-	int			force_overwrite)
+	bool			force_overwrite)
 {
+	memset(ft, 0, sizeof(*ft));
 	get_device_topology(&xi->data, &ft->data, force_overwrite);
 	get_device_topology(&xi->rt, &ft->rt, force_overwrite);
 	get_device_topology(&xi->log, &ft->log, force_overwrite);

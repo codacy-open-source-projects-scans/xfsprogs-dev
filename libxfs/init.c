@@ -214,9 +214,6 @@ init_caches(void)
 		fprintf(stderr, "Could not allocate btree cursor caches.\n");
 		abort();
 	}
-	xfs_extfree_item_cache = kmem_cache_init(
-			sizeof(struct xfs_extent_free_item),
-			"xfs_extfree_item");
 	xfs_trans_cache = kmem_cache_init(
 			sizeof(struct xfs_trans), "xfs_trans");
 	xfs_parent_args_cache = kmem_cache_init(
@@ -236,7 +233,6 @@ destroy_caches(void)
 	leaked += kmem_cache_destroy(xfs_da_state_cache);
 	xfs_defer_destroy_item_caches();
 	xfs_btree_destroy_cur_caches();
-	leaked += kmem_cache_destroy(xfs_extfree_item_cache);
 	leaked += kmem_cache_destroy(xfs_trans_cache);
 	leaked += kmem_cache_destroy(xfs_parent_args_cache);
 

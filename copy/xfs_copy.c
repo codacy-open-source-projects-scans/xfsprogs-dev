@@ -759,7 +759,7 @@ main(int argc, char **argv)
 			"%s: Aborting.\n"), progname, source_name, progname);
 		exit(1);
 	} else if (mp->m_sb.sb_inprogress)  {
-		do_log(_("%s %s filesystem failed to initialize\n"
+		do_log(_("%s mkfs for %s filesystem still in progress\n"
 			"%s: Aborting.\n"), progname, source_name, progname);
 		exit(1);
 	} else if (mp->m_sb.sb_logstart == 0)  {

@@ -1044,7 +1044,7 @@ struct sb_feat_args {
 	bool	inode_align;		/* XFS_SB_VERSION_ALIGNBIT */
 	bool	nci;			/* XFS_SB_VERSION_BORGBIT */
 	bool	lazy_sb_counters;	/* XFS_SB_VERSION2_LAZYSBCOUNTBIT */
-	bool	parent_pointers;	/* XFS_SB_VERSION2_PARENTBIT */
+	bool	parent_pointers;	/* XFS_SB_FEAT_INCOMPAT_PARENT */
 	bool	projid32bit;		/* XFS_SB_VERSION2_PROJID32BIT */
 	bool	crcs_enabled;		/* XFS_SB_VERSION2_CRCBIT */
 	bool	dirftype;		/* XFS_SB_VERSION2_FTYPE */
@@ -1330,9 +1330,11 @@ nr_cpus(void)
 
 static void
 check_device_type(
+	struct cli_params	*cli,
 	struct libxfs_dev	*dev,
 	bool			no_size,
 	bool			dry_run,
+	const char		*device_type,
 	const char		*optname)
 {
 	struct stat statbuf;
@@ -1345,7 +1347,8 @@ check_device_type(
 	}
 
 	if (!dev->name) {
-		fprintf(stderr, _("No device name specified\n"));
+		fprintf(stderr, _("No %s device name specified\n"),
+				device_type);
 		usage();
 	}
 
@@ -1373,6 +1376,13 @@ check_device_type(
 			dev->isfile = 1;
 		else if (!dry_run)
 			dev->create = 1;
+
+		/*
+		 * Explicitly disable direct IO for image files so we don't
+		 * error out on sector size mismatches between the new
+		 * filesystem and the underlying host filesystem.
+		 */
+		cli->xi->flags &= ~LIBXFS_DIRECT;
 		return;
 	}
 
@@ -1594,34 +1604,6 @@ discard_blocks(int fd, uint64_t nsectors, int quiet)
 		offset += tmp_step;
 	}
 	if (offset > 0 && !quiet)
-		printf("Done.\n");
-}
-
-static void
-reset_zones(
-	struct mkfs_params	*cfg,
-	int			fd,
-	uint64_t		start_sector,
-	uint64_t		nsectors,
-	int			quiet)
-{
-	struct blk_zone_range range = {
-		.sector		= start_sector,
-		.nr_sectors	= nsectors,
-	};
-
-	if (!quiet) {
-		printf("Resetting zones...");
-		fflush(stdout);
-	}
-
-	if (ioctl(fd, BLKRESETZONE, &range) < 0) {
-		if (!quiet)
-			printf(" FAILED (%d)\n", -errno);
-		exit(1);
-	}
-
-	if (!quiet)
 		printf("Done.\n");
 }
 
@@ -2376,22 +2358,16 @@ validate_sectorsize(
 	 * Before anything else, verify that we are correctly operating on
 	 * files or block devices and set the control parameters correctly.
 	 */
-	check_device_type(&cli->xi->data, !cli->dsize, dry_run, "d");
+	check_device_type(cli, &cli->xi->data, !cli->dsize, dry_run,
+			"data", "d");
 	if (!cli->loginternal)
-		check_device_type(&cli->xi->log, !cli->logsize, dry_run, "l");
+		check_device_type(cli, &cli->xi->log, !cli->logsize, dry_run,
+				"log", "l");
 	if (cli->xi->rt.name)
-		check_device_type(&cli->xi->rt, !cli->rtsize, dry_run, "r");
+		check_device_type(cli, &cli->xi->rt, !cli->rtsize, dry_run,
+				"RT", "r");
 
-	/*
-	 * Explicitly disable direct IO for image files so we don't error out on
-	 * sector size mismatches between the new filesystem and the underlying
-	 * host filesystem.
-	 */
-	if (cli->xi->data.isfile || cli->xi->log.isfile || cli->xi->rt.isfile)
-		cli->xi->flags &= ~LIBXFS_DIRECT;
-
-	memset(ft, 0, sizeof(*ft));
-	get_topology(cli->xi, ft, force_overwrite);
+	libxfs_get_topology(cli->xi, ft, force_overwrite);
 
 	/* set configured sector sizes in preparation for checks */
 	if (!cli->sectorsize) {
@@ -2570,6 +2546,28 @@ struct zone_topology {
 #define ZONES_PER_IOCTL			16384
 
 static void
+zone_validate_capacity(
+	struct zone_info	*zi,
+	__u64			capacity,
+	bool			conventional)
+{
+	if (conventional && zi->zone_capacity != zi->zone_size) {
+		fprintf(stderr, _("Zone capacity equal to Zone size required for conventional zones.\n"));
+		exit(1);
+	}
+
+	if (zi->zone_capacity > zi->zone_size) {
+		fprintf(stderr, _("Zone capacity larger than zone size!\n"));
+		exit(1);
+	}
+
+	if (zi->zone_capacity != capacity) {
+		fprintf(stderr, _("Inconsistent zone capacity!\n"));
+		exit(1);
+	}
+}
+
+static void
 report_zones(
 	const char		*name,
 	struct zone_info	*zi)
@@ -2645,6 +2643,11 @@ _("Inconsistent zone size!\n"));
 
 			switch (zones[i].type) {
 			case BLK_ZONE_TYPE_CONVENTIONAL:
+				if (!zi->zone_capacity)
+					zi->zone_capacity = zones[i].capacity;
+				zone_validate_capacity(zi, zones[i].capacity,
+						       true);
+
 				/*
 				 * We can only use the conventional space at the
 				 * start of the device for metadata, so don't
@@ -2656,6 +2659,11 @@ _("Inconsistent zone size!\n"));
 					zi->nr_conv_zones++;
 				break;
 			case BLK_ZONE_TYPE_SEQWRITE_REQ:
+				if (!found_seq)
+					zi->zone_capacity = zones[i].capacity;
+				zone_validate_capacity(zi, zones[i].capacity,
+						       false);
+
 				found_seq = true;
 				break;
 			case BLK_ZONE_TYPE_SEQWRITE_PREF:
@@ -2665,19 +2673,6 @@ _("Sequential write preferred zones not supported.\n"));
 			default:
 				fprintf(stderr,
 _("Unknown zone type (0x%x) found.\n"), zones[i].type);
-				exit(1);
-			}
-
-			if (!n) {
-				zi->zone_capacity = zones[i].capacity;
-				if (zi->zone_capacity > zi->zone_size) {
-					fprintf(stderr,
-_("Zone capacity larger than zone size!\n"));
-					exit(1);
-				}
-			} else if (zones[i].capacity != zi->zone_capacity) {
-				fprintf(stderr,
-_("Inconsistent zone capacity!\n"));
 				exit(1);
 			}
 
@@ -2705,11 +2700,6 @@ validate_zoned(
 			if (!zt->data.nr_conv_zones) {
 				fprintf(stderr,
 _("Data devices requires conventional zones.\n"));
-				usage();
-			}
-			if (zt->data.zone_capacity != zt->data.zone_size) {
-				fprintf(stderr,
-_("Zone capacity equal to Zone size required for conventional zones.\n"));
 				usage();
 			}
 
@@ -3776,39 +3766,64 @@ discard_devices(
 	struct zone_topology	*zt,
 	int			quiet)
 {
-	/*
-	 * This function has to be called after libxfs has been initialized.
-	 */
-
 	if (!xi->data.isfile) {
 		uint64_t	nsectors = xi->data.size;
 
-		if (cfg->rtstart && zt->data.nr_zones) {
-			/*
-			 * Note that the zone reset here includes the LBA range
-			 * for the data device.
-			 *
-			 * This is because doing a single zone reset all on the
-			 * entire device (which the kernel automatically does
-			 * for us for a full device range) is a lot faster than
-			 * resetting each zone individually and resetting
-			 * the conventional zones used for the data device is a
-			 * no-op.
-			 */
-			reset_zones(cfg, xi->data.fd, 0,
-					cfg->rtstart + xi->rt.size, quiet);
+		if (cfg->rtstart && zt->data.nr_zones)
 			nsectors -= cfg->rtstart;
-		}
 		discard_blocks(xi->data.fd, nsectors, quiet);
 	}
-	if (xi->rt.dev && !xi->rt.isfile) {
-		if (zt->rt.nr_zones)
-			reset_zones(cfg, xi->rt.fd, 0, xi->rt.size, quiet);
-		else
-			discard_blocks(xi->rt.fd, xi->rt.size, quiet);
-	}
+	if (xi->rt.dev && !xi->rt.isfile && !zt->rt.nr_zones)
+		discard_blocks(xi->rt.fd, xi->rt.size, quiet);
 	if (xi->log.dev && xi->log.dev != xi->data.dev && !xi->log.isfile)
 		discard_blocks(xi->log.fd, xi->log.size, quiet);
+}
+
+static void
+reset_zones(
+	struct mkfs_params	*cfg,
+	struct libxfs_dev	*dev,
+	uint64_t		size,
+	bool			quiet)
+{
+	struct blk_zone_range range = {
+		.nr_sectors	= size,
+	};
+
+	if (!quiet) {
+		printf("Resetting zones...");
+		fflush(stdout);
+	}
+	if (ioctl(dev->fd, BLKRESETZONE, &range) < 0) {
+		if (!quiet)
+			printf(" FAILED (%d)\n", -errno);
+		exit(1);
+	}
+	if (!quiet)
+		printf("Done.\n");
+}
+
+static void
+reset_devices(
+	struct mkfs_params	*cfg,
+	struct libxfs_init	*xi,
+	struct zone_topology	*zt,
+	int			quiet)
+{
+	/*
+	 * Note that the zone reset here includes the conventional zones used
+	 * for the data device.
+	 *
+	 * It is done that way because doing a single zone reset all on the
+	 * entire device (which the kernel automatically does for us for a full
+	 * device range) is a lot faster than resetting each zone individually
+	 * and resetting the conventional zones used for the data device is a
+	 * no-op.
+	 */
+	if (!xi->data.isfile && zt->data.nr_zones && cfg->rtstart)
+		reset_zones(cfg, &xi->data, cfg->rtstart + xi->rt.size, quiet);
+	if (xi->rt.dev && !xi->rt.isfile && zt->rt.nr_zones)
+		reset_zones(cfg, &xi->rt, xi->rt.size, quiet);
 }
 
 static void
@@ -4001,8 +4016,7 @@ ddev_is_solidstate(
 static void
 calc_concurrency_ag_geometry(
 	struct mkfs_params	*cfg,
-	struct cli_params	*cli,
-	struct libxfs_init	*xi)
+	struct cli_params	*cli)
 {
 	uint64_t		try_agsize;
 	uint64_t		def_agsize;
@@ -4070,11 +4084,10 @@ out:
 static void
 calculate_initial_ag_geometry(
 	struct mkfs_params	*cfg,
-	struct cli_params	*cli,
-	struct libxfs_init	*xi)
+	struct cli_params	*cli)
 {
 	if (cli->data_concurrency > 0) {
-		calc_concurrency_ag_geometry(cfg, cli, xi);
+		calc_concurrency_ag_geometry(cfg, cli);
 	} else if (cli->agsize) {	/* User-specified AG size */
 		cfg->agsize = getnum(cli->agsize, &dopts, D_AGSIZE);
 
@@ -4095,8 +4108,9 @@ _("agsize (%s) not a multiple of fs blk size (%d)\n"),
 		cfg->agcount = cli->agcount;
 		cfg->agsize = cfg->dblocks / cfg->agcount +
 				(cfg->dblocks % cfg->agcount != 0);
-	} else if (cli->data_concurrency == -1 && ddev_is_solidstate(xi)) {
-		calc_concurrency_ag_geometry(cfg, cli, xi);
+	} else if (cli->data_concurrency == -1 &&
+		   ddev_is_solidstate(cli->xi)) {
+		calc_concurrency_ag_geometry(cfg, cli);
 	} else {
 		calc_default_ag_geometry(cfg->blocklog, cfg->dblocks,
 					 cfg->dsunit, &cfg->agsize,
@@ -4356,8 +4370,7 @@ rtdev_is_solidstate(
 static void
 calc_concurrency_rtgroup_geometry(
 	struct mkfs_params	*cfg,
-	struct cli_params	*cli,
-	struct libxfs_init	*xi)
+	struct cli_params	*cli)
 {
 	uint64_t		try_rgsize;
 	uint64_t		def_rgsize;
@@ -4464,8 +4477,7 @@ _("realtime group count (%llu) must be less than the maximum (%u)\n"),
 static void
 calculate_rtgroup_geometry(
 	struct mkfs_params	*cfg,
-	struct cli_params	*cli,
-	struct libxfs_init	*xi)
+	struct cli_params	*cli)
 {
 	if (!cli->sb_feat.metadir) {
 		cfg->rgcount = 0;
@@ -4506,8 +4518,9 @@ _("rgsize (%s) not a multiple of fs blk size (%d)\n"),
 		cfg->rgsize = cfg->rtblocks;
 		cfg->rgcount = 0;
 	} else if (cli->rtvol_concurrency > 0 ||
-		   (cli->rtvol_concurrency == -1 && rtdev_is_solidstate(xi))) {
-		calc_concurrency_rtgroup_geometry(cfg, cli, xi);
+		   (cli->rtvol_concurrency == -1 &&
+		    rtdev_is_solidstate(cli->xi))) {
+		calc_concurrency_rtgroup_geometry(cfg, cli);
 	} else if (is_power_of_2(cfg->rtextblocks)) {
 		cfg->rgsize = calc_rgsize_extsize_power(cfg);
 		cfg->rgcount = cfg->rtblocks / cfg->rgsize +
@@ -4534,7 +4547,6 @@ static void
 adjust_nr_zones(
 	struct mkfs_params	*cfg,
 	struct cli_params	*cli,
-	struct libxfs_init	*xi,
 	struct zone_topology	*zt)
 {
 	uint64_t		new_rtblocks, slack;
@@ -4543,16 +4555,15 @@ adjust_nr_zones(
 	if (zt->rt.nr_zones)
 		max_zones = zt->rt.nr_zones;
 	else
-		max_zones = DTOBT(xi->rt.size, cfg->blocklog) / cfg->rgsize;
+		max_zones = DTOBT(cli->xi->rt.size, cfg->blocklog) /
+				cfg->rgsize;
 
-	if (!cli->rgcount)
-		cfg->rgcount += XFS_RESERVED_ZONES;
 	if (cfg->rgcount > max_zones) {
-		cfg->rgcount = max_zones;
 		fprintf(stderr,
-_("Warning: not enough zones for backing requested rt size due to\n"
+_("Warning: not enough zones (%lu/%u) for backing requested rt size due to\n"
   "over-provisioning needs, writable size will be less than %s\n"),
-			cli->rtsize);
+			cfg->rgcount, max_zones, cli->rtsize);
+		cfg->rgcount = max_zones;
 	}
 	new_rtblocks = (cfg->rgcount * cfg->rgsize);
 	slack = (new_rtblocks - cfg->rtblocks) % cfg->rgsize;
@@ -4572,7 +4583,6 @@ static void
 calculate_zone_geometry(
 	struct mkfs_params	*cfg,
 	struct cli_params	*cli,
-	struct libxfs_init	*xi,
 	struct zone_topology	*zt)
 {
 	if (cfg->rtblocks == 0) {
@@ -4640,9 +4650,9 @@ _("rgsize (%s) not a multiple of fs blk size (%d)\n"),
 		}
 	}
 
-	if (cli->rtsize || cli->rgcount)
-		adjust_nr_zones(cfg, cli, xi, zt);
-
+	if (cli->rtsize)
+		cfg->rgcount += XFS_RESERVED_ZONES;
+	adjust_nr_zones(cfg, cli, zt);
 	if (cfg->rgcount < XFS_MIN_ZONES)  {
 		fprintf(stderr,
 _("realtime group count (%llu) must be greater than the minimum zone count (%u)\n"),
@@ -4980,7 +4990,6 @@ static uint64_t
 calc_concurrency_logblocks(
 	struct mkfs_params	*cfg,
 	struct cli_params	*cli,
-	struct libxfs_init	*xi,
 	unsigned int		max_tx_bytes)
 {
 	uint64_t		log_bytes;
@@ -4988,7 +4997,7 @@ calc_concurrency_logblocks(
 	unsigned int		new_logblocks;
 
 	if (cli->log_concurrency < 0) {
-		if (!ddev_is_solidstate(xi))
+		if (!ddev_is_solidstate(cli->xi))
 			goto out;
 
 		cli->log_concurrency = nr_cpus();
@@ -5156,7 +5165,6 @@ static void
 calculate_log_size(
 	struct mkfs_params	*cfg,
 	struct cli_params	*cli,
-	struct libxfs_init	*xi,
 	struct xfs_mount	*mp)
 {
 	struct xfs_sb		*sbp = &mp->m_sb;
@@ -5221,8 +5229,8 @@ _("external log device size %lld blocks too small, must be at least %lld blocks\
 		if (cfg->lsunit) {
 			uint64_t	max_logblocks;
 
-			max_logblocks = min(DTOBT(xi->log.size, cfg->blocklog),
-					    XFS_MAX_LOG_BLOCKS);
+			max_logblocks = min(XFS_MAX_LOG_BLOCKS,
+				DTOBT(cli->xi->log.size, cfg->blocklog));
 			align_log_size(cfg, cfg->lsunit, max_logblocks);
 		}
 
@@ -5257,7 +5265,7 @@ _("max log size %d smaller than min log size %d, filesystem is too small\n"),
 
 		if (cli->log_concurrency != 0)
 			cfg->logblocks = calc_concurrency_logblocks(cfg, cli,
-							xi, max_tx_bytes);
+							max_tx_bytes);
 
 		/* But don't go below a reasonable size */
 		cfg->logblocks = max(cfg->logblocks,
@@ -5974,11 +5982,12 @@ main(
 			.rmapbt = true,
 			.reflink = true,
 			.inobtcnt = true,
-			.parent_pointers = false,
+			.parent_pointers = true,
 			.nodalign = false,
 			.nortalign = false,
 			.bigtime = true,
 			.nrext64 = true,
+			.exchrange = true,
 			/*
 			 * When we decide to enable a new feature by default,
 			 * please remember to update the mkfs conf files.
@@ -6131,12 +6140,12 @@ main(
 	 * dependent on device sizes. Once calculated, make sure everything
 	 * aligns to device geometry correctly.
 	 */
-	calculate_initial_ag_geometry(&cfg, &cli, &xi);
+	calculate_initial_ag_geometry(&cfg, &cli);
 	align_ag_geometry(&cfg, &ft);
 	if (cfg.sb_feat.zoned)
-		calculate_zone_geometry(&cfg, &cli, &xi, &zt);
+		calculate_zone_geometry(&cfg, &cli, &zt);
 	else
-		calculate_rtgroup_geometry(&cfg, &cli, &xi);
+		calculate_rtgroup_geometry(&cfg, &cli);
 
 	calculate_imaxpct(&cfg, &cli);
 
@@ -6160,7 +6169,7 @@ main(
 	 * With the mount set up, we can finally calculate the log size
 	 * constraints and do default size calculations and final validation
 	 */
-	calculate_log_size(&cfg, &cli, &xi, mp);
+	calculate_log_size(&cfg, &cli, mp);
 
 	finish_superblock_setup(&cfg, mp, sbp);
 
@@ -6197,13 +6206,10 @@ main(
 	/*
 	 * All values have been validated, discard the old device layout.
 	 */
-	if (cli.sb_feat.zoned && !discard) {
-		fprintf(stderr,
- _("-K not support for zoned file systems.\n"));
-		return 1;
-	}
 	if (discard && !dry_run)
-		discard_devices(&cfg, &xi, &zt, quiet);
+		discard_devices(&cfg, cli.xi, &zt, quiet);
+	if (cli.sb_feat.zoned && !dry_run)
+		reset_devices(&cfg, cli.xi, &zt, quiet);
 
 	/*
 	 * we need the libxfs buffer cache from here on in.

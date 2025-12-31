@@ -214,7 +214,7 @@ struct fsxattr {
  * fsxattr
  */
 struct file_attr {
-	__u32	fa_xflags;
+	__u64	fa_xflags;
 	__u32	fa_extsize;
 	__u32	fa_nextents;
 	__u32	fa_projid;

@@ -184,8 +184,7 @@ guess_default_geometry(
 	uint64_t		dblocks;
 	int			multidisk;
 
-	memset(&ft, 0, sizeof(ft));
-	get_topology(x, &ft, 1);
+	libxfs_get_topology(x, &ft, true);
 
 	/*
 	 * get geometry from get_topology result.

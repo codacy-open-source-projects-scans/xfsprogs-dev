@@ -1772,6 +1772,7 @@ handle_direntry(
 	create_nondir_inode(mp, pip, fsxp, mode, creds, xname, flags, file_stat,
 			    rdev, fd, fname);
 out:
+	close(pathfd);
 	/* Reset path_buf to original */
 	path_buf[path_len] = '\0';
 }

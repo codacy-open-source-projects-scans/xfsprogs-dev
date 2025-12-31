@@ -114,7 +114,7 @@ xfrog_file_setattr(
 
 	file_attr_to_fsxattr(fa, &fsxa);
 
-	error = ioctl(fd, FS_IOC_FSSETXATTR, fa);
+	error = ioctl(fd, FS_IOC_FSSETXATTR, &fsxa);
 	close(fd);
 
 	return error;

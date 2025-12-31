@@ -12,89 +12,49 @@
 
 static cmdinfo_t inject_cmd;
 
+#define ARRAY_SIZE(x)		(sizeof(x) / sizeof((x)[0]))
+#define __stringify_1(x...)	#x
+#define __stringify(x...)	__stringify_1(x)
+
+#define XFS_ERRTAG(_tag, _name, _default) \
+        [XFS_ERRTAG_##_tag]	=  __stringify(_name),
+#include "xfs_errortag.h"
+static const char *tag_names[] = { XFS_ERRTAGS };
+#undef XFS_ERRTAG
+
+/* Search for a name */
 static int
-error_tag(char *name)
+error_tag(
+	char		*name)
 {
-	static struct {
-		int	tag;
-		char	*name;
-	} *e, eflags[] = {
-		{ XFS_ERRTAG_NOERROR,			"noerror" },
-		{ XFS_ERRTAG_IFLUSH_1,			"iflush1" },
-		{ XFS_ERRTAG_IFLUSH_2,			"iflush2" },
-		{ XFS_ERRTAG_IFLUSH_3,			"iflush3" },
-		{ XFS_ERRTAG_IFLUSH_4,			"iflush4" },
-		{ XFS_ERRTAG_IFLUSH_5,			"iflush5" },
-		{ XFS_ERRTAG_IFLUSH_6,			"iflush6" },
-		{ XFS_ERRTAG_DA_READ_BUF,		"dareadbuf" },
-		{ XFS_ERRTAG_BTREE_CHECK_LBLOCK,	"btree_chk_lblk" },
-		{ XFS_ERRTAG_BTREE_CHECK_SBLOCK,	"btree_chk_sblk" },
-		{ XFS_ERRTAG_ALLOC_READ_AGF,		"readagf" },
-		{ XFS_ERRTAG_IALLOC_READ_AGI,		"readagi" },
-		{ XFS_ERRTAG_ITOBP_INOTOBP,		"itobp" },
-		{ XFS_ERRTAG_IUNLINK,			"iunlink" },
-		{ XFS_ERRTAG_IUNLINK_REMOVE,		"iunlinkrm" },
-		{ XFS_ERRTAG_DIR_INO_VALIDATE,		"dirinovalid" },
-		{ XFS_ERRTAG_BULKSTAT_READ_CHUNK,	"bulkstat" },
-		{ XFS_ERRTAG_IODONE_IOERR,		"logiodone" },
-		{ XFS_ERRTAG_STRATREAD_IOERR,		"stratread" },
-		{ XFS_ERRTAG_STRATCMPL_IOERR,		"stratcmpl" },
-		{ XFS_ERRTAG_DIOWRITE_IOERR,		"diowrite" },
-		{ XFS_ERRTAG_BMAPIFORMAT,		"bmapifmt" },
-		{ XFS_ERRTAG_FREE_EXTENT,		"free_extent" },
-		{ XFS_ERRTAG_RMAP_FINISH_ONE,		"rmap_finish_one" },
-		{ XFS_ERRTAG_REFCOUNT_CONTINUE_UPDATE,	"refcount_continue_update" },
-		{ XFS_ERRTAG_REFCOUNT_FINISH_ONE,	"refcount_finish_one" },
-		{ XFS_ERRTAG_BMAP_FINISH_ONE,		"bmap_finish_one" },
-		{ XFS_ERRTAG_AG_RESV_CRITICAL,		"ag_resv_critical" },
-		{ XFS_ERRTAG_DROP_WRITES,		"drop_writes" },
-		{ XFS_ERRTAG_LOG_BAD_CRC,		"log_bad_crc" },
-		{ XFS_ERRTAG_LOG_ITEM_PIN,		"log_item_pin" },
-		{ XFS_ERRTAG_BUF_LRU_REF,		"buf_lru_ref" },
-		{ XFS_ERRTAG_FORCE_SCRUB_REPAIR,	"force_repair" },
-		{ XFS_ERRTAG_FORCE_SUMMARY_RECALC,	"bad_summary" },
-		{ XFS_ERRTAG_IUNLINK_FALLBACK,		"iunlink_fallback" },
-		{ XFS_ERRTAG_BUF_IOERROR,		"buf_ioerror" },
-		{ XFS_ERRTAG_REDUCE_MAX_IEXTENTS,	"reduce_max_iextents" },
-		{ XFS_ERRTAG_BMAP_ALLOC_MINLEN_EXTENT,	"bmap_alloc_minlen_extent" },
-		{ XFS_ERRTAG_AG_RESV_FAIL,		"ag_resv_fail" },
-		{ XFS_ERRTAG_LARP,			"larp" },
-		{ XFS_ERRTAG_DA_LEAF_SPLIT,		"da_leaf_split" },
-		{ XFS_ERRTAG_ATTR_LEAF_TO_NODE,		"attr_leaf_to_node" },
-		{ XFS_ERRTAG_WB_DELAY_MS,		"wb_delay_ms" },
-		{ XFS_ERRTAG_WRITE_DELAY_MS,		"write_delay_ms" },
-		{ XFS_ERRTAG_EXCHMAPS_FINISH_ONE,	"exchmaps_finish_one" },
-		{ XFS_ERRTAG_METAFILE_RESV_CRITICAL,	"metafile_resv_crit" },
-		{ XFS_ERRTAG_MAX,			NULL }
-	};
-	int	count;
+	unsigned int	i;
 
-	/*
-	 * If this fails make sure every tag is defined in the array above,
-	 * see xfs_errortag_attrs in kernelspace.
-	 */
-	BUILD_BUG_ON(sizeof(eflags) != (XFS_ERRTAG_MAX + 1) * sizeof(*e));
+	for (i = 0; i < ARRAY_SIZE(tag_names); i++)
+		if (tag_names[i] && strcmp(name, tag_names[i]) == 0)
+			return i;
+	return -1;
+}
 
-	/* Search for a name */
-	if (name) {
-		for (e = eflags; e->name; e++)
-			if (strcmp(name, e->name) == 0)
-				return e->tag;
-		return -1;
-	}
+/* Dump all the names */
+static void
+list_tags(void)
+{
+	unsigned int	count = 0, i;
 
-	/* Dump all the names */
 	fputs("tags: [ ", stdout);
-	for (count = 0, e = eflags; e->name; e++, count++) {
-		if (count) {
+	for (i = 0; i < ARRAY_SIZE(tag_names); i++) {
+		if (count > 0) {
 			fputs(", ", stdout);
 			if (!(count % 5))
 				fputs("\n\t", stdout);
 		}
-		fputs(e->name, stdout);
+		if (tag_names[i]) {
+			fputs(tag_names[i], stdout);
+			count++;
+		}
+
 	}
 	fputs(" ]\n", stdout);
-	return 0;
 }
 
 static void
@@ -121,8 +81,10 @@ inject_f(
 	xfs_error_injection_t	error;
 	int			command = XFS_IOC_ERROR_INJECTION;
 
-	if (argc == 1)
-		return error_tag(NULL);
+	if (argc == 1) {
+		list_tags();
+		return 0;
+	}
 
 	while (--argc > 0) {
 		error.fd = file->fd;

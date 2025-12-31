@@ -2395,21 +2395,24 @@ process_btinode(
 
 static int
 process_exinode(
-	struct xfs_dinode 	*dip,
+	struct xfs_dinode	*dip,
 	int			whichfork)
 {
 	xfs_extnum_t		max_nex = xfs_iext_max_nextents(
 			xfs_dinode_has_large_extent_counts(dip), whichfork);
 	xfs_extnum_t		nex = xfs_dfork_nextents(dip, whichfork);
-	int			used = nex * sizeof(struct xfs_bmbt_rec);
+	uint64_t		used;
 
-	if (nex > max_nex || used > XFS_DFORK_SIZE(dip, mp, whichfork)) {
-		if (metadump.show_warnings)
-			print_warning("bad number of extents %llu in inode %lld",
-				(unsigned long long)nex,
-				(long long)metadump.cur_ino);
-		return 1;
-	}
+	if (check_mul_overflow(nex, sizeof(struct xfs_bmbt_rec), &used))
+		goto out_warn;
+
+	/* Invalid number of extents */
+	if (nex > max_nex)
+		goto out_warn;
+
+	/* Extent array should fit into the inode fork */
+	if (used > XFS_DFORK_SIZE(dip, mp, whichfork))
+		goto out_warn;
 
 	/* Zero unused data fork past used extents */
 	if (metadump.zero_stale_data &&
@@ -2421,6 +2424,12 @@ process_exinode(
 	return process_bmbt_reclist(dip, whichfork,
 			(struct xfs_bmbt_rec *)XFS_DFORK_PTR(dip, whichfork),
 			nex);
+
+out_warn:
+	if (metadump.show_warnings)
+		print_warning("bad number of extents %llu in inode %lld",
+			(unsigned long long)nex, (long long)metadump.cur_ino);
+	return 1;
 }
 
 static int
