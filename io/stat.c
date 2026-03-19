@@ -282,6 +282,12 @@ statfs_f(
 			printf(_("geom.rtextsize = %u\n"), fsgeo.rtextsize);
 			printf(_("geom.sunit = %u\n"), fsgeo.sunit);
 			printf(_("geom.swidth = %u\n"), fsgeo.swidth);
+			printf(_("geom.rgextents = %u\n"), fsgeo.rgextents);
+			printf(_("geom.rgcount = %u\n"), fsgeo.rgcount);
+			printf(_("geom.rtstart = %llu\n"),
+				(unsigned long long)fsgeo.rtstart);
+			printf(_("geom.rtreserved = %llu\n"),
+				(unsigned long long)fsgeo.rtreserved);
 		}
 	}
 

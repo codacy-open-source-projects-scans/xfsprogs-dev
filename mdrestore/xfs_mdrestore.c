@@ -8,7 +8,6 @@
 #include "xfs_metadump.h"
 #include <libfrog/platform.h>
 #include "libfrog/div64.h"
-#include <linux/blkzoned.h>
 
 union mdrestore_headers {
 	__be32				magic;
@@ -437,12 +436,20 @@ restore_v2(
 	if (fread(&xme, sizeof(xme), 1, md_fp) != 1)
 		fatal("error reading from metadump file\n");
 
-	if (xme.xme_addr != 0 || be32_to_cpu(xme.xme_len) != 1 ||
-	    (be64_to_cpu(xme.xme_addr) & XME_ADDR_DEVICE_MASK) !=
-			XME_ADDR_DATA_DEVICE)
-		fatal("Invalid superblock disk address/length\n");
+	/*
+	 * The first block must be the primary super, which is at the start of
+	 * the data device, which is device 0.
+	 */
+	if (xme.xme_addr != 0)
+		fatal("Invalid superblock disk address 0x%llx\n",
+				be64_to_cpu(xme.xme_addr));
 
 	len = BBTOB(be32_to_cpu(xme.xme_len));
+
+	/* The primary superblock is always a single filesystem sector. */
+	if (len < BBTOB(1) || len > XFS_MAX_SECTORSIZE)
+		fatal("Invalid superblock disk length 0x%x\n",
+				be32_to_cpu(xme.xme_len));
 
 	if (fread(block_buffer, len, 1, md_fp) != 1)
 		fatal("error reading from metadump file\n");

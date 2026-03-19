@@ -3,10 +3,10 @@
  * Copyright (c) 2024 Christoph Hellwig.
  */
 #include <ctype.h>
-#include <linux/blkzoned.h>
 #include "libxfs_priv.h"
 #include "libxfs.h"
 #include "xfs_zones.h"
+#include "libfrog/zones.h"
 #include "err_protos.h"
 #include "zoned.h"
 
@@ -51,8 +51,7 @@ check_zones(
 	uint64_t		sector = XFS_FSB_TO_BB(mp, mp->m_sb.sb_rtstart);
 	unsigned int		zone_size, zone_capacity;
 	uint64_t		device_size;
-	size_t			rep_size;
-	struct blk_zone_report	*rep;
+	struct xfrog_zone_report *rep = NULL;
 	unsigned int		i, n = 0;
 
 	if (ioctl(fd, BLKGETSIZE64, &device_size))
@@ -67,31 +66,18 @@ check_zones(
 		return;
 	}
 
-	rep_size = sizeof(struct blk_zone_report) +
-		   sizeof(struct blk_zone) * ZONES_PER_IOCTL;
-	rep = malloc(rep_size);
-	if (!rep) {
-		do_warn(_("malloc failed for zone report\n"));
-		return;
-	}
-
 	while (n < mp->m_sb.sb_rgcount) {
-		struct blk_zone *zones = (struct blk_zone *)(rep + 1);
-		int ret;
+		struct blk_zone *zones;
 
-		memset(rep, 0, rep_size);
-		rep->sector = sector;
-		rep->nr_zones = ZONES_PER_IOCTL;
+		rep = xfrog_report_zones(fd, sector, rep);
+		if (!rep)
+			return;
 
-		ret = ioctl(fd, BLKREPORTZONE, rep);
-		if (ret) {
-			do_error(_("ioctl(BLKREPORTZONE) failed: %d!\n"), ret);
-			goto out_free;
-		}
-		if (!rep->nr_zones)
+		if (!rep->rep.nr_zones)
 			break;
 
-		for (i = 0; i < rep->nr_zones; i++) {
+		zones = rep->zones;
+		for (i = 0; i < rep->rep.nr_zones; i++) {
 			if (n >= mp->m_sb.sb_rgcount)
 				break;
 
@@ -130,8 +116,8 @@ _("Inconsistent zone capacity!\n"));
 			report_zones_cb(mp, &zones[i]);
 			n++;
 		}
-		sector = zones[rep->nr_zones - 1].start +
-			 zones[rep->nr_zones - 1].len;
+		sector = zones[rep->rep.nr_zones - 1].start +
+			 zones[rep->rep.nr_zones - 1].len;
 	}
 
 out_free:

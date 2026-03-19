@@ -45,6 +45,31 @@ xfs_rtgroup_min_block(
 	return 0;
 }
 
+/* Compute the number of rt extents in this realtime group. */
+static xfs_rtxnum_t
+__xfs_rtgroup_extents(
+	struct xfs_mount	*mp,
+	xfs_rgnumber_t		rgno,
+	xfs_rgnumber_t		rgcount,
+	xfs_rtbxlen_t		rextents)
+{
+	ASSERT(rgno < rgcount);
+	if (rgno == rgcount - 1)
+		return rextents - ((xfs_rtxnum_t)rgno * mp->m_sb.sb_rgextents);
+
+	ASSERT(xfs_has_rtgroups(mp));
+	return mp->m_sb.sb_rgextents;
+}
+
+xfs_rtxnum_t
+xfs_rtgroup_extents(
+	struct xfs_mount	*mp,
+	xfs_rgnumber_t		rgno)
+{
+	return __xfs_rtgroup_extents(mp, rgno, mp->m_sb.sb_rgcount,
+			mp->m_sb.sb_rextents);
+}
+
 /* Precompute this group's geometry */
 void
 xfs_rtgroup_calc_geometry(
@@ -55,7 +80,8 @@ xfs_rtgroup_calc_geometry(
 	xfs_rtbxlen_t		rextents)
 {
 	rtg->rtg_extents = __xfs_rtgroup_extents(mp, rgno, rgcount, rextents);
-	rtg_group(rtg)->xg_block_count = rtg->rtg_extents * mp->m_sb.sb_rextsize;
+	rtg_group(rtg)->xg_block_count =
+		rtg->rtg_extents * mp->m_sb.sb_rextsize;
 	rtg_group(rtg)->xg_min_gbno = xfs_rtgroup_min_block(mp, rgno);
 }
 
@@ -131,31 +157,6 @@ xfs_initialize_rtgroups(
 out_unwind_new_rtgs:
 	xfs_free_rtgroups(mp, first_rgno, index);
 	return error;
-}
-
-/* Compute the number of rt extents in this realtime group. */
-xfs_rtxnum_t
-__xfs_rtgroup_extents(
-	struct xfs_mount	*mp,
-	xfs_rgnumber_t		rgno,
-	xfs_rgnumber_t		rgcount,
-	xfs_rtbxlen_t		rextents)
-{
-	ASSERT(rgno < rgcount);
-	if (rgno == rgcount - 1)
-		return rextents - ((xfs_rtxnum_t)rgno * mp->m_sb.sb_rgextents);
-
-	ASSERT(xfs_has_rtgroups(mp));
-	return mp->m_sb.sb_rgextents;
-}
-
-xfs_rtxnum_t
-xfs_rtgroup_extents(
-	struct xfs_mount	*mp,
-	xfs_rgnumber_t		rgno)
-{
-	return __xfs_rtgroup_extents(mp, rgno, mp->m_sb.sb_rgcount,
-			mp->m_sb.sb_rextents);
 }
 
 /*

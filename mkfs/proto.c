@@ -374,6 +374,17 @@ writefile(
 			break;
 		}
 
+		/*
+		 * If we pass an unaligned range to libxfs_file_write, it will
+		 * zero the unaligned head and tail parts of each block.  If
+		 * the fd filesystem has a smaller blocksize, then we can end
+		 * up writing to the same block twice, causing unwanted zeroing
+		 * and hence data corruption.
+		 */
+		data_pos = rounddown_64(data_pos, mp->m_sb.sb_blocksize);
+		hole_pos = min(roundup_64(hole_pos, mp->m_sb.sb_blocksize),
+			       statbuf.st_size);
+
 		writefile_range(ip, fname, fd, data_pos, hole_pos - data_pos);
 		data_pos = lseek(fd, hole_pos, SEEK_DATA);
 	}
@@ -1412,18 +1423,18 @@ handle_hardlink(
 	struct xfs_trans	*tp;
 	struct xfs_parent_args	*ppargs = NULL;
 
-	tp = getres(mp, 0);
-	ppargs = newpptr(mp);
-	dst_ino = get_hardlink_dst_inode(file_stat.st_ino);
-
 	/*
 	 * We didn't find the hardlink inode, this means it's the first time
 	 * we see it, report error so create_nondir_inode() can continue handling the
 	 * inode as a regular file type, and later save the source inode in our
 	 * buffer for future consumption.
 	 */
+	dst_ino = get_hardlink_dst_inode(file_stat.st_ino);
 	if (dst_ino == 0)
 		return false;
+
+	tp = getres(mp, 0);
+	ppargs = newpptr(mp);
 
 	error = -libxfs_iget(mp, NULL, dst_ino, 0, &ip);
 	if (error)
@@ -1546,12 +1557,7 @@ create_nondir_inode(
 		close(fd);
 		return;
 	}
-	/*
-	 * If instead we have an error it means the hardlink was not registered,
-	 * so we proceed to treat it like a regular file, and save it to our
-	 * tracker later.
-	 */
-	tp = getres(mp, 0);
+
 	/*
 	 * In case of symlinks, we need to handle things a little differently.
 	 * We need to read out our link target and act accordingly.
@@ -1563,6 +1569,8 @@ create_nondir_inode(
 		if (link_len >= PATH_MAX)
 			fail(_("symlink target too long"), ENAMETOOLONG);
 		tp = getres(mp, XFS_B_TO_FSB(mp, link_len));
+	} else {
+		tp = getres(mp, 0);
 	}
 	ppargs = newpptr(mp);
 

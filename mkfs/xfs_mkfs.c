@@ -6,7 +6,6 @@
 #include "libfrog/util.h"
 #include "libxfs.h"
 #include <ctype.h>
-#include <linux/blkzoned.h>
 #include "libxfs/xfs_zones.h"
 #include "xfs_multidisk.h"
 #include "libxcmd.h"
@@ -15,6 +14,7 @@
 #include "libfrog/crc32cselftest.h"
 #include "libfrog/dahashselftest.h"
 #include "libfrog/fsproperties.h"
+#include "libfrog/zones.h"
 #include "proto.h"
 #include <ini.h>
 
@@ -2542,9 +2542,6 @@ struct zone_topology {
 	struct zone_info	log;
 };
 
-/* random size that allows efficient processing */
-#define ZONES_PER_IOCTL			16384
-
 static void
 zone_validate_capacity(
 	struct zone_info	*zi,
@@ -2572,12 +2569,11 @@ report_zones(
 	const char		*name,
 	struct zone_info	*zi)
 {
-	struct blk_zone_report	*rep;
+	struct xfrog_zone_report *rep = NULL;
 	bool			found_seq = false;
-	int			fd, ret = 0;
+	int			fd;
 	uint64_t		device_size;
 	uint64_t		sector = 0;
-	size_t			rep_size;
 	unsigned int		i, n = 0;
 	struct stat		st;
 
@@ -2587,10 +2583,8 @@ report_zones(
 		exit(1);
 	}
 
-	if (fstat(fd, &st) < 0) {
-		ret = -EIO;
+	if (fstat(fd, &st) < 0)
 		goto out_close;
-	}
 	if (!S_ISBLK(st.st_mode))
 		goto out_close;
 
@@ -2606,32 +2600,18 @@ report_zones(
 	zi->nr_zones = device_size / zi->zone_size;
 	zi->nr_conv_zones = 0;
 
-	rep_size = sizeof(struct blk_zone_report) +
-		   sizeof(struct blk_zone) * ZONES_PER_IOCTL;
-	rep = malloc(rep_size);
-	if (!rep) {
-		fprintf(stderr,
-_("Failed to allocate memory for zone reporting.\n"));
-		exit(1);
-	}
-
 	while (n < zi->nr_zones) {
-		struct blk_zone *zones = (struct blk_zone *)(rep + 1);
+		struct blk_zone *zones;
 
-		memset(rep, 0, rep_size);
-		rep->sector = sector;
-		rep->nr_zones = ZONES_PER_IOCTL;
-
-		ret = ioctl(fd, BLKREPORTZONE, rep);
-		if (ret) {
-			fprintf(stderr,
-_("ioctl(BLKREPORTZONE) failed: %d!\n"), -errno);
+		rep = xfrog_report_zones(fd, sector, rep);
+		if (!rep)
 			exit(1);
-		}
-		if (!rep->nr_zones)
+
+		if (!rep->rep.nr_zones)
 			break;
 
-		for (i = 0; i < rep->nr_zones; i++) {
+		zones = rep->zones;
+		for (i = 0; i < rep->rep.nr_zones; i++) {
 			if (n >= zi->nr_zones)
 				break;
 
@@ -2678,8 +2658,8 @@ _("Unknown zone type (0x%x) found.\n"), zones[i].type);
 
 			n++;
 		}
-		sector = zones[rep->nr_zones - 1].start +
-			 zones[rep->nr_zones - 1].len;
+		sector = zones[rep->rep.nr_zones - 1].start +
+			 zones[rep->rep.nr_zones - 1].len;
 	}
 
 	free(rep);
@@ -3644,8 +3624,6 @@ check_lsunit:
 		lsunit = cli->lsunit;
 	else if (cli_opt_set(&lopts, L_SU))
 		lsu = getnum(cli->lsu, &lopts, L_SU);
-	else if (cfg->lsectorsize > XLOG_HEADER_SIZE)
-		lsu = cfg->blocksize; /* lsunit matches filesystem block size */
 
 	if (lsu) {
 		/* verify if lsu is a multiple block size */
@@ -3671,14 +3649,22 @@ _("log stripe unit (%d) must be a multiple of the block size (%d)\n"),
 	if (lsunit) {
 		/* convert from 512 byte blocks to fs blocks */
 		cfg->lsunit = DTOBT(lsunit, cfg->blocklog);
-	} else if (cfg->sb_feat.log_version == 2 &&
-		   cfg->loginternal && cfg->dsunit) {
-		/* lsunit and dsunit now in fs blocks */
-		cfg->lsunit = cfg->dsunit;
-	} else if (cfg->sb_feat.log_version == 2 &&
-		   !cfg->loginternal) {
-		/* use the external log device properties */
-		cfg->lsunit = DTOBT(ft->log.sunit, cfg->blocklog);
+	} else if (cfg->sb_feat.log_version == 2 && cfg->loginternal) {
+		if (cfg->dsunit) {
+			/* lsunit and dsunit now in fs blocks */
+			cfg->lsunit = cfg->dsunit;
+		} else if (cfg->lsectorsize > XLOG_HEADER_SIZE) {
+			/* lsunit matches filesystem block size */
+			cfg->lsunit = 1;
+		}
+	} else if (cfg->sb_feat.log_version == 2 && !cfg->loginternal) {
+		if (ft->log.sunit > 0) {
+			/* use the external log device properties */
+			cfg->lsunit = DTOBT(ft->log.sunit, cfg->blocklog);
+		} else if (cfg->lsectorsize > XLOG_HEADER_SIZE) {
+			/* lsunit matches filesystem block size */
+			cfg->lsunit = 1;
+		}
 	}
 
 	if (cfg->sb_feat.log_version == 2 &&
@@ -3694,6 +3680,36 @@ _("log stripe unit (%d bytes) is too large (maximum is 256KiB)\n"
 		cfg->lsunit = (32 * 1024) / cfg->blocksize;
 	}
 
+}
+
+static uint64_t
+calc_rtstart(
+	const struct mkfs_params	*cfg,
+	const struct libxfs_init	*xi)
+{
+	uint64_t			rt_target_size;
+	uint64_t			rtstart = 1;
+
+	if (cfg->dblocks) {
+		/*
+		 * If the user specified the size of the data device but not
+		 * the start of the internal rt device, set the internal rt
+		 * volume to start at the end of the data device.
+		 */
+		return cfg->dblocks << (cfg->blocklog - BBSHIFT);
+	}
+
+	/*
+	 * By default reserve at 1% of the total capacity (rounded up to the
+	 * next power of two) for metadata, but match the minimum we enforce
+	 * elsewhere. This matches what SMR HDDs provide.
+	 */
+	rt_target_size = max((xi->data.size + 99) / 100,
+			     BTOBB(300 * 1024 * 1024));
+
+	while (rtstart < rt_target_size)
+		rtstart <<= 1;
+	return rtstart;
 }
 
 static void
@@ -3720,17 +3736,7 @@ open_devices(
 		zt->rt.zone_capacity = zt->data.zone_capacity;
 		zt->rt.nr_zones = zt->data.nr_zones - zt->data.nr_conv_zones;
 	} else if (cfg->sb_feat.zoned && !cfg->rtstart && !xi->rt.dev) {
-		/*
-		 * By default reserve at 1% of the total capacity (rounded up to
-		 * the next power of two) for metadata, but match the minimum we
-		 * enforce elsewhere. This matches what SMR HDDs provide.
-		 */
-		uint64_t rt_target_size = max((xi->data.size + 99) / 100,
-					      BTOBB(300 * 1024 * 1024));
-
-		cfg->rtstart = 1;
-		while (cfg->rtstart < rt_target_size)
-			cfg->rtstart <<= 1;
+		cfg->rtstart = calc_rtstart(cfg, xi);
 	}
 
 	if (cfg->rtstart) {
@@ -4559,10 +4565,11 @@ adjust_nr_zones(
 				cfg->rgsize;
 
 	if (cfg->rgcount > max_zones) {
-		fprintf(stderr,
+		if (cli->rtsize)
+			fprintf(stderr,
 _("Warning: not enough zones (%lu/%u) for backing requested rt size due to\n"
   "over-provisioning needs, writable size will be less than %s\n"),
-			cfg->rgcount, max_zones, cli->rtsize);
+				cfg->rgcount, max_zones, cli->rtsize);
 		cfg->rgcount = max_zones;
 	}
 	new_rtblocks = (cfg->rgcount * cfg->rgsize);
@@ -5823,6 +5830,7 @@ set_autofsck(
 	}
 
 	libxfs_irele(args.dp);
+	free(p);
 }
 
 /* Write the realtime superblock */

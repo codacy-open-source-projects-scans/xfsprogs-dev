@@ -35,7 +35,8 @@ radix-tree.c \
 randbytes.c \
 scrub.c \
 util.c \
-workqueue.c
+workqueue.c \
+zones.c
 
 HFILES = \
 avl64.h \
@@ -65,7 +66,8 @@ radix-tree.h \
 randbytes.h \
 scrub.h \
 statx.h \
-workqueue.h
+workqueue.h \
+zones.h
 
 GETTEXT_PY = \
 	gettext.py
