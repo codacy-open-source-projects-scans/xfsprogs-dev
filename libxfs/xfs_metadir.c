@@ -3,7 +3,7 @@
  * Copyright (c) 2018-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -18,6 +18,7 @@
 #include "xfs_metadir.h"
 #include "xfs_trace.h"
 #include "xfs_inode.h"
+#include "xfs_quota.h"
 #include "xfs_ialloc.h"
 #include "xfs_bmap_btree.h"
 #include "xfs_da_format.h"
@@ -29,6 +30,7 @@
 #include "xfs_parent.h"
 #include "xfs_health.h"
 #include "xfs_errortag.h"
+#include "xfs_error.h"
 #include "xfs_btree.h"
 #include "xfs_alloc.h"
 
@@ -93,7 +95,7 @@ xfs_metadir_lookup(
 		.hashval	= xfs_dir2_hashname(mp, xname),
 		.whichfork	= XFS_DATA_FORK,
 		.op_flags	= XFS_DA_OP_OKNOENT,
-		.owner		= dp->i_ino,
+		.owner		= I_INO(dp),
 	};
 	int			error;
 

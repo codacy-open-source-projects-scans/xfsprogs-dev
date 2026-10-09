@@ -74,7 +74,8 @@ report_to_kernel(
 	 */
 	if (repair_item_count_needsrepair(&sri) != 0 &&
 	    !debug_tweak_on("XFS_SCRUB_FORCE_REPAIR")) {
-		str_info(ctx, _("Couldn't upload clean bill of health."), NULL);
+		str_info(ctx, ctx->mntpoint,
+_("Couldn't upload clean bill of health."));
 	}
 
 	return 0;
@@ -85,27 +86,29 @@ int
 scrub_cleanup(
 	struct scrub_ctx	*ctx)
 {
-	int			error;
+	int			error, error2;
 
 	error = report_to_kernel(ctx);
-	if (error)
-		return error;
 
 	action_list_free(&ctx->file_repair_list);
 	action_list_free(&ctx->fs_repair_list);
 
 	if (ctx->fshandle)
 		free_handle(ctx->fshandle, ctx->fshandle_len);
-	if (ctx->rtdev)
-		disk_close(ctx->rtdev);
-	if (ctx->logdev)
-		disk_close(ctx->logdev);
-	if (ctx->datadev)
-		disk_close(ctx->datadev);
+	if (ctx->verify_disks[XFS_DEV_DATA])
+		disk_close(ctx->verify_disks[XFS_DEV_DATA]);
+	if (ctx->verify_disks[XFS_DEV_LOG])
+		disk_close(ctx->verify_disks[XFS_DEV_LOG]);
+	if (ctx->verify_disks[XFS_DEV_RT] &&
+	    ctx->verify_disks[XFS_DEV_RT] != ctx->verify_disks[XFS_DEV_DATA])
+		disk_close(ctx->verify_disks[XFS_DEV_RT]);
 	fshandle_destroy();
-	error = -xfd_close(&ctx->mnt);
-	if (error)
+	error2 = -xfd_close(&ctx->mnt);
+	if (error2) {
+		if (!error)
+			error = error2;
 		str_liberror(ctx, error, _("closing mountpoint fd"));
+	}
 	fs_table_destroy();
 
 	return error;
@@ -176,8 +179,6 @@ mode_from_autofsck(
 		break;
 	}
 
-	fsprops_free_handle(&fph);
-
 summarize:
 	switch (ctx->mode) {
 	case SCRUB_MODE_NONE:
@@ -198,6 +199,7 @@ summarize:
 		break;
 	}
 
+	fsprops_free_handle(&fph);
 	return;
 no_property:
 	/*
@@ -211,6 +213,54 @@ no_property:
 	else
 		ctx->mode = SCRUB_MODE_NONE;
 	goto summarize;
+}
+
+/*
+ * We can't do XFS_IOC_VERIFY_MEDIA media verification, so we need to fall back
+ * to reading the disk.  We already opened the data device, now we need to open
+ * the rt and log devices for media verification.
+ */
+static int
+configure_xfs_verify_fallback(
+	struct scrub_ctx	*ctx)
+{
+	if (ctx->fsinfo.fs_log) {
+		ctx->verify_disks[XFS_DEV_LOG] = disk_open(ctx->fsinfo.fs_log);
+		if (!ctx->verify_disks[XFS_DEV_LOG]) {
+			str_error(ctx, ctx->mntpoint,
+				_("Unable to open external log device."));
+			return ECANCELED;
+		}
+	}
+
+	if (ctx->mnt.fsgeom.rtstart) {
+		ctx->verify_disks[XFS_DEV_RT] = ctx->verify_disks[XFS_DEV_DATA];
+	} else if (ctx->fsinfo.fs_rt || ctx->mnt.fsgeom.rtstart) {
+		ctx->verify_disks[XFS_DEV_RT] = disk_open(ctx->fsinfo.fs_rt);
+		if (!ctx->verify_disks[XFS_DEV_RT]) {
+			str_error(ctx, ctx->mntpoint,
+				_("Unable to open realtime device."));
+			return ECANCELED;
+		}
+	}
+
+	ctx->no_verify_ioctl = true;
+	return 0;
+}
+
+/* Does the XFS driver support media scanning its own disks? */
+static bool
+configure_xfs_verify(
+	struct scrub_ctx	*ctx)
+{
+	struct xfs_verify_media	me = {
+		/* just probe for support using an empty range */
+		.me_start_daddr	= 0,
+		.me_end_daddr	= 0,
+		.me_dev		= XFS_DEV_DATA,
+	};
+
+	return ioctl(ctx->mnt.fd, XFS_IOC_VERIFY_MEDIA, &me) == 0;
 }
 
 /*
@@ -296,6 +346,8 @@ _("Not an XFS filesystem."));
 	 */
 	if (ctx->mode == SCRUB_MODE_NONE)
 		mode_from_autofsck(ctx);
+	if (ctx->mode == SCRUB_MODE_NONE)
+		return 0;
 
 	/* Do we have kernel-assisted metadata scrubbing? */
 	if (!can_scrub_fs_metadata(ctx) || !can_scrub_inode(ctx) ||
@@ -349,34 +401,31 @@ _("Unable to find realtime device path."));
 	}
 
 	/* Open the raw devices. */
-	ctx->datadev = disk_open(ctx->fsinfo.fs_name);
-	if (!ctx->datadev) {
+	ctx->verify_disks[XFS_DEV_DATA] = disk_open(ctx->fsinfo.fs_name);
+	if (!ctx->verify_disks[XFS_DEV_DATA]) {
 		str_error(ctx, ctx->mntpoint, _("Unable to open data device."));
 		return ECANCELED;
 	}
 
-	ctx->nr_io_threads = disk_heads(ctx->datadev);
+	ctx->nr_scan_threads = disk_heads(ctx->verify_disks[XFS_DEV_DATA]);
 	if (verbose) {
 		fprintf(stdout, _("%s: using %d threads to scrub.\n"),
 				ctx->mntpoint, scrub_nproc(ctx));
 		fflush(stdout);
 	}
 
-	if (ctx->fsinfo.fs_log) {
-		ctx->logdev = disk_open(ctx->fsinfo.fs_log);
-		if (!ctx->logdev) {
-			str_error(ctx, ctx->mntpoint,
-				_("Unable to open external log device."));
-			return ECANCELED;
-		}
-	}
-	if (ctx->fsinfo.fs_rt) {
-		ctx->rtdev = disk_open(ctx->fsinfo.fs_rt);
-		if (!ctx->rtdev) {
-			str_error(ctx, ctx->mntpoint,
-				_("Unable to open realtime device."));
-			return ECANCELED;
-		}
+	if (configure_xfs_verify(ctx)) {
+		/*
+		 * ioctl-based media verification is enabled and we already set
+		 * nr_io_threads from the data device, so we no longer need to
+		 * keep this open.
+		 */
+		disk_close(ctx->verify_disks[XFS_DEV_DATA]);
+		ctx->verify_disks[XFS_DEV_DATA] = NULL;
+	} else {
+		error = configure_xfs_verify_fallback(ctx);
+		if (error)
+			return error;
 	}
 
 	/*

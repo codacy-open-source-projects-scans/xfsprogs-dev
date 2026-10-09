@@ -125,7 +125,8 @@ scrub_scan_estimate_blocks(
 	unsigned long long		*d_bfree,
 	unsigned long long		*r_blocks,
 	unsigned long long		*r_bfree,
-	unsigned long long		*f_files_used)
+	unsigned long long		*f_files_used,
+	unsigned long long		*l_blocks)
 {
 	struct xfs_fsop_counts		fc;
 	int				error;
@@ -140,6 +141,7 @@ scrub_scan_estimate_blocks(
 	*r_blocks = ctx->mnt.fsgeom.rtblocks;
 	*r_bfree = fc.freertx * ctx->mnt.fsgeom.rtextsize;
 	*f_files_used = fc.allocino - fc.freeino;
+	*l_blocks = ctx->mnt.fsgeom.logblocks;
 
 	return 0;
 }

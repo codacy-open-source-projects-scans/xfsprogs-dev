@@ -57,10 +57,8 @@ struct scrub_ctx {
 	struct statvfs		mnt_sv;
 	struct statfs		mnt_sf;
 
-	/* Open block devices */
-	struct disk		*datadev;
-	struct disk		*logdev;
-	struct disk		*rtdev;
+	/* Open block devices for legacy verify */
+	struct disk		*verify_disks[XFS_DEV_RT + 1];
 
 	/* What does the user want us to do? */
 	enum scrub_mode		mode;
@@ -72,7 +70,7 @@ struct scrub_ctx {
 	struct xfs_fd		mnt;
 
 	/* Number of threads for metadata scrubbing */
-	unsigned int		nr_io_threads;
+	unsigned int		nr_scan_threads;
 
 	/* XFS specific geometry */
 	struct fs_path		fsinfo;
@@ -81,6 +79,7 @@ struct scrub_ctx {
 
 	/* Data block read verification buffer */
 	void			*readbuf;
+	bool			no_verify_ioctl;
 
 	/* Mutable scrub state; use lock. */
 	pthread_mutex_t		lock;
@@ -108,6 +107,9 @@ struct scrub_ctx {
 	 * this much space per volume.
 	 */
 	double			fstrim_block_pct;
+
+	/* CLI options, must be int */
+	int			print_svcname;
 };
 
 /*
@@ -129,7 +131,7 @@ int phase7_func(struct scrub_ctx *ctx);
 int phase8_func(struct scrub_ctx *ctx);
 
 /* Progress estimator functions */
-unsigned int scrub_estimate_ag_work(struct scrub_ctx *ctx);
+unsigned int scrub_estimate_group_work(struct scrub_ctx *ctx);
 unsigned int scrub_estimate_iscan_work(struct scrub_ctx *ctx);
 int phase2_estimate(struct scrub_ctx *ctx, uint64_t *items,
 		    unsigned int *nr_threads, int *rshift);

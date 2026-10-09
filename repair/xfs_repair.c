@@ -28,6 +28,7 @@
 #include "quotacheck.h"
 #include "rcbag_btree.h"
 #include "rt.h"
+#include "libfrog/convert.h"
 
 /*
  * option tables for getsubopt calls
@@ -457,10 +458,12 @@ do_error(char const *msg, ...)
 {
 	va_list args;
 
+	flockfile(stderr);
 	fprintf(stderr, _("\nfatal error -- "));
 
 	va_start(args, msg);
 	vfprintf(stderr, msg, args);
+	funlockfile(stderr);
 	if (dumpcore)
 		abort();
 	exit(1);
@@ -667,7 +670,7 @@ check_metadir_inode(
 
 	/* If we changed the metadir inode, try reloading it. */
 	if (!mp->m_metadirip ||
-	    mp->m_metadirip->i_ino != mp->m_sb.sb_metadirino) {
+	    I_INO(mp->m_metadirip) != mp->m_sb.sb_metadirino) {
 		if (mp->m_metadirip)
 			libxfs_irele(mp->m_metadirip);
 
@@ -1321,8 +1324,8 @@ main(int argc, char **argv)
 		}
 
 		max_mem -= mem_used;
-		if (max_mem >= (1 << 30))
-			max_mem = 1 << 30;
+		if (max_mem >= GIGABYTES(1))
+			max_mem = GIGABYTES(1);
 		libxfs_bhash_size = max_mem / (HASH_CACHE_RATIO *
 				(igeo->inode_cluster_size >> 10));
 		if (libxfs_bhash_size < 512)

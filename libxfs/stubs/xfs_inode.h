@@ -72,6 +72,7 @@ struct inode {
 	unsigned long		i_state; /* Not actually used in userspace */
 	uint32_t		i_generation;
 	uint64_t		i_version;
+	uint64_t		i_ino;		/* inode number (agno/agino) */
 	struct timespec64	__i_atime;
 	struct timespec64	__i_mtime;
 	struct timespec64	__i_ctime; /* use inode_*_ctime accessors! */
@@ -218,7 +219,6 @@ static inline bool inode_wrong_type(const struct inode *inode, umode_t mode)
 typedef struct xfs_inode {
 	struct cache_node	i_node;
 	struct xfs_mount	*i_mount;	/* fs mount struct ptr */
-	xfs_ino_t		i_ino;		/* inode number (agno/agino) */
 	struct xfs_imap		i_imap;		/* location for xfs_imap() */
 	struct xfs_ifork	*i_cowfp;	/* copy on write extents */
 	struct xfs_ifork	i_df;		/* data fork */
@@ -252,7 +252,6 @@ typedef struct xfs_inode {
 	xfs_agino_t		i_next_unlinked;
 	xfs_agino_t		i_prev_unlinked;
 
-	xfs_fsize_t		i_size;		/* in-memory size */
 	struct inode		i_vnode;
 } xfs_inode_t;
 
@@ -337,7 +336,7 @@ static inline const struct inode *VFS_IC(const struct xfs_inode *ip)
 /* We only have i_size in the xfs inode in userspace */
 static inline loff_t i_size_read(struct inode *inode)
 {
-	return XFS_I(inode)->i_size;
+	return XFS_I(inode)->i_disk_size;
 }
 
 /*
@@ -353,18 +352,16 @@ static inline bool XFS_ISDIR(struct xfs_inode *ip)
 	return S_ISDIR(VFS_I(ip)->i_mode);
 }
 
-/*
- * For regular files we only update the on-disk filesize when actually
- * writing data back to disk.  Until then only the copy in the VFS inode
- * is uptodate.
- */
 static inline xfs_fsize_t XFS_ISIZE(struct xfs_inode *ip)
 {
-	if (XFS_ISREG(ip))
-		return ip->i_size;
 	return ip->i_disk_size;
 }
 #define XFS_IS_REALTIME_INODE(ip) ((ip)->i_diflags & XFS_DIFLAG_REALTIME)
+
+static inline uint64_t I_INO(const struct xfs_inode *ip)
+{
+	return VFS_IC(ip)->i_ino;
+}
 
 static inline bool xfs_is_zoned_inode(struct xfs_inode *ip)
 {

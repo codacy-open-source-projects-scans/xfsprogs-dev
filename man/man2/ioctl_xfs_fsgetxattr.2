@@ -238,6 +238,28 @@ Caller did not have permission to change the attributes.
 This API is implemented by the ext4, xfs, btrfs, and f2fs filesystems on the
 Linux kernel.
 Not all fields may be understood by filesystems other than xfs.
+.SH CAVEATS
+The
+.B XFS_IOC_FSGETXATTR
+and
+.B XFS_IOC_FSSETXATTR
+.BR ioctl (2)
+operations require the user to open the file,
+but this may not be possible or
+lead to side effects on special files such as
+FIFOs,
+sockets,
+block devices,
+character devices,
+and symlinks.
+.P
+For a pathname-based interface see the
+.BR file_getattr (2)
+and
+.BR file_setattr (2)
+syscalls.
 .SH SEE ALSO
 .BR ioctl (2),
-.BR ioctl_iflags (2)
+.BR ioctl_iflags (2),
+.BR file_getattr (2),
+.BR file_setattr (2)

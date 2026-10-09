@@ -3,7 +3,7 @@
  * Copyright (c) 2021-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -12,8 +12,8 @@
 #include "xfs_mount.h"
 #include "xfs_trans.h"
 #include "xfs_btree.h"
-#include "xfile.h"
-#include "buf_mem.h"
+#include "xfs_error.h"
+#include "xfs_buf_mem.h"
 #include "xfs_btree_mem.h"
 #include "xfs_ag.h"
 #include "xfs_trace.h"

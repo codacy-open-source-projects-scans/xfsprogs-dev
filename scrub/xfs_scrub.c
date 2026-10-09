@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <paths.h>
+#include <math.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/statvfs.h>
@@ -19,6 +20,7 @@
 #include "unicrash.h"
 #include "progress.h"
 #include "libfrog/histogram.h"
+#include "libfrog/systemd.h"
 
 /*
  * XFS Online Metadata Scrub (and Repair)
@@ -110,7 +112,6 @@
  * XFS_SCRUB_FORCE_ERROR	-- pretend all metadata is corrupt
  * XFS_SCRUB_FORCE_REPAIR	-- repair all metadata even if it's ok
  * XFS_SCRUB_NO_KERNEL		-- pretend there is no kernel ioctl
- * XFS_SCRUB_NO_SCSI_VERIFY	-- disable SCSI VERIFY (if present)
  * XFS_SCRUB_PHASE		-- run only this scrub phase
  * XFS_SCRUB_THREADS		-- start exactly this number of threads
  * XFS_SCRUB_DISK_ERROR_INTERVAL-- simulate a disk error every this many bytes
@@ -610,12 +611,20 @@ report_outcome(
 	 * are not corruptions.
 	 */
 	if (ctx->scrub_setup_succeeded && actionable_errors > 0) {
-		char		*msg;
+		char		*msg = NULL;
 
-		if (ctx->mode != SCRUB_MODE_REPAIR)
+		switch (ctx->mode) {
+		case SCRUB_MODE_DRY_RUN:
 			msg = _("%s: Re-run xfs_scrub without -n.\n");
-		else
+			break;
+		case SCRUB_MODE_PREEN:
+			msg = _("%s: Re-run xfs_scrub without -p.\n");
+			break;
+		case SCRUB_MODE_NONE:
+		case SCRUB_MODE_REPAIR:
 			msg = _("%s: Unmount and run xfs_repair.\n");
+			break;
+		}
 
 		fprintf(stderr, msg, ctx->mntpoint);
 	}
@@ -675,7 +684,7 @@ parse_o_opts(
 			errno = 0;
 			dval = strtod(val, &endp);
 
-			if (*endp) {
+			if (*endp || isnan(dval)) {
 				fprintf(stderr,
  _("-o fstrim_pct must be a floating point number\n"));
 				usage();
@@ -709,6 +718,13 @@ parse_o_opts(
 	}
 }
 
+enum long_opt_nr {
+	LOPT_HELP,
+	LOPT_SVCNAME,
+
+	LOPT_MAX,
+};
+
 int
 main(
 	int			argc,
@@ -716,11 +732,15 @@ main(
 {
 	struct scrub_ctx	ctx = {
 		.fstrim_block_pct = FSTRIM_BLOCK_PCT_DEFAULT,
+		.lock		= (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER,
+		.mode		= SCRUB_MODE_REPAIR,
+		.error_action	= ERRORS_CONTINUE,
 	};
 	struct phase_rusage	all_pi;
 	char			*mtab = NULL;
 	FILE			*progress_fp = NULL;
 	struct fs_path		*fsp;
+	int			option_index;
 	int			vflag = 0;
 	int			c;
 	int			fd;
@@ -738,14 +758,29 @@ main(
 		fprintf(stderr,
 	_("%s: couldn't initialize Unicode library.\n"),
 				progname);
+		ret = SCRUB_RET_OPERROR;
 		goto out_unicrash;
 	}
 
-	pthread_mutex_init(&ctx.lock, NULL);
-	ctx.mode = SCRUB_MODE_REPAIR;
-	ctx.error_action = ERRORS_CONTINUE;
-	while ((c = getopt(argc, argv, "a:bC:de:kM:m:no:pTvxV")) != EOF) {
+	struct option long_options[] = {
+		[LOPT_HELP]	   = {"help", no_argument, NULL, 0 },
+		[LOPT_SVCNAME]	   = {"svcname", no_argument, &ctx.print_svcname, 1 },
+
+		[LOPT_MAX]	   = {NULL, 0, NULL, 0 },
+	};
+
+	while ((c = getopt_long(argc, argv, "a:bC:de:kM:m:no:pTvxV",
+				long_options, &option_index)) != EOF) {
 		switch (c) {
+		case 0:
+			switch (option_index) {
+			case LOPT_HELP:
+				usage();
+				break;
+			default:
+				break;
+			}
+			break;
 		case 'a':
 			ctx.max_errors = cvt_u64(optarg, 10);
 			if (errno) {
@@ -859,6 +894,23 @@ main(
 	if (!ctx.actual_mntpoint)
 		ctx.actual_mntpoint = ctx.mntpoint;
 
+	if (ctx.print_svcname) {
+		char		unitname[PATH_MAX];
+		const char	*template =
+			scrub_data ? XFS_SCRUB_MEDIA_SVCNAME :
+				     XFS_SCRUB_SVCNAME;
+
+		ret = systemd_path_instance_unit_name(template,
+				ctx.mntpoint, unitname, sizeof(unitname));
+		if (ret) {
+			perror(ctx.mntpoint);
+			return EXIT_FAILURE;
+		}
+
+		printf("%s\n", unitname);
+		return EXIT_SUCCESS;
+	}
+
 	stdout_isatty = isatty(STDOUT_FILENO);
 	stderr_isatty = isatty(STDERR_FILENO);
 
@@ -866,8 +918,7 @@ main(
 	if (stdout_isatty && !progress_fp)
 		progress_fp = fdopen(1, "w+");
 
-	if (getenv("SERVICE_MODE"))
-		is_service = true;
+	is_service = systemd_is_service();
 
 	/* Initialize overall phase stats. */
 	error = phase_start(&all_pi, 0, NULL);
@@ -960,29 +1011,15 @@ out_unicrash:
 	hist_free(&ctx.datadev_hist);
 	hist_free(&ctx.rtdev_hist);
 
-	/*
-	 * If we're being run as a service, the return code must fit the LSB
-	 * init script action error guidelines, which is to say that we
-	 * compress all errors to 1 ("generic or unspecified error", LSB 5.0
-	 * section 22.2) and hope the admin will scan the log for what
-	 * actually happened.
-	 *
-	 * We have to sleep 2 seconds here because journald uses the pid to
-	 * connect our log messages to the systemd service.  This is critical
-	 * for capturing all the log messages if the scrub fails, because the
-	 * fail service uses the service name to gather log messages for the
-	 * error report.
-	 *
-	 * Note: We don't count a lack of kernel support as a service failure
-	 * because we haven't determined that there's anything wrong with the
-	 * filesystem.
-	 */
 	if (is_service) {
-		sleep(2);
+		/*
+		 * Note: We don't count a lack of kernel support as a service
+		 * failure because we haven't determined that there's anything
+		 * wrong with the filesystem.
+		 */
 		if (!ctx.scrub_setup_succeeded)
-			return 0;
-		if (ret != SCRUB_RET_SUCCESS)
-			return 1;
+			ret = 0;
+		return systemd_service_exit(ret);
 	}
 
 	return ret;

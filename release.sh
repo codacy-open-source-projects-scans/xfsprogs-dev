@@ -1,13 +1,6 @@
-#!/bin/sh
+#!/usr/bin/env bash
 #
 # Automate generation of a new release
-#
-# Need to first update these files:
-#
-# VERSION (with new version number)
-# docs/CHANGES (with changelog and version/date string)
-# configure.ac (with new version string)
-# debian/changelog (with new release entry, only for release version)
 
 set -e
 
@@ -50,8 +43,10 @@ prepare_mail() {
 	if [ -n "$LAST_HEAD" ]; then
 		if [ $branch == "master" ]; then
 			reason="$(git describe --abbrev=0 $branch) released"
+			for_next_update="\n\nThe for-next branch has also been updated to match the state of master."
 		else
 			reason="for-next updated to $(git log --oneline --format="%h" -1 $branch)"
+			for_next_update=""
 		fi;
 		cat << EOF > $mail_file
 To: linux-xfs@vger.kernel.org
@@ -67,9 +62,7 @@ The xfsprogs $branch branch in repository at:
 has just been updated.
 
 Patches often get missed, so if your outstanding patches are properly reviewed
-on the list and not included in this update, please let me know.
-
-The for-next branch has also been updated to match the state of master.
+on the list and not included in this update, please let me know.$(printf "%b" "$for_next_update")
 
 The new head of the $branch branch is commit:
 
@@ -198,4 +191,9 @@ printf "\tgit push origin v${version} master:master master:for-next\n"
 if [ -n "$LAST_HEAD" ]; then
 	echo "Command to send ANNOUNCE email"
 	printf "\tneomutt -H $mail_file\n"
+fi
+if [ $KUP -ne 1 ]; then
+	echo "Don't forget to upload tarball:"
+	echo -e "\tkup put xfsprogs-${version}.tar.gz" \
+		"xfsprogs-${version}.tar.sign pub/linux/utils/fs/xfs/xfsprogs/"
 fi

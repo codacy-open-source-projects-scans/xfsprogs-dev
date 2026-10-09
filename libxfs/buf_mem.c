@@ -3,10 +3,9 @@
  * Copyright (c) 2023-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "libxfs.h"
-#include "libxfs/xfile.h"
-#include "libxfs/buf_mem.h"
+#include "xfs_buf_mem.h"
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>

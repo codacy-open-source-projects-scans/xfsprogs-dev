@@ -26,10 +26,9 @@ HFILES = \
 	listxattr.h \
 	init.h \
 	iunlink.h \
-	libxfs_priv.h \
+	xfs_platform.h \
 	linux-err.h \
 	topology.h \
-	buf_mem.h \
 	xfblob.h \
 	xfile.h \
 	xfs_ag_resv.h \
@@ -55,6 +54,7 @@ HFILES = \
 	xfs_inode_buf.h \
 	xfs_inode_fork.h \
 	xfs_inode_util.h \
+	xfs_log_recover.h \
 	xfs_metadir.h \
 	xfs_metafile.h \
 	xfs_parent.h \
@@ -72,7 +72,15 @@ HFILES = \
 	xfs_trans_resv.h \
 	xfs_trans_space.h \
 	xfs_dir2_priv.h \
-	xfs_zones.h
+	xfs_zones.h \
+	stubs/xfs_buf_mem.h \
+	stubs/xfs_error.h \
+	stubs/xfs_extent_busy.h \
+	stubs/xfs_inode.h \
+	stubs/xfs_mount.h \
+	stubs/xfs_quota.h \
+	stubs/xfs_trace.h \
+	stubs/xfs_trans.h
 
 CFILES = buf_mem.c \
 	cache.c \
@@ -169,7 +177,7 @@ endif
 
 FCFLAGS = -I.
 
-LTLIBS = $(LIBPTHREAD) $(LIBRT)
+LTLIBS = $(LIBPTHREAD) $(LIBRT) $(LIBFROG)
 
 # don't try linking xfs_repair with a debug libxfs.
 DEBUG = -DNDEBUG

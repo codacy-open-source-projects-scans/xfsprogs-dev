@@ -1,4 +1,4 @@
-AC_INIT([xfsprogs],[6.19.0],[linux-xfs@vger.kernel.org])
+AC_INIT([xfsprogs],[7.2.0],[linux-xfs@vger.kernel.org])
 AC_PREREQ([2.69])
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_MACRO_DIR([m4])
@@ -110,6 +110,12 @@ AC_ARG_ENABLE(libicu,
 [  --enable-libicu=[yes/no]  Enable Unicode name scanning in xfs_scrub (libicu) [default=probe]],,
 	enable_libicu=probe)
 
+# Enable xfs_healer build
+AC_ARG_ENABLE(healer,
+[  --enable-healer=[yes/no]  Enable build of xfs_healer utility [[default=yes]]],,
+	enable_healer=yes)
+AC_SUBST(enable_healer)
+
 #
 # If the user specified a libdir ending in lib64 do not append another
 # 64 to the library names.
@@ -182,6 +188,14 @@ AC_CONFIG_UDEV_RULE_DIR
 AC_HAVE_BLKID_TOPO
 AC_HAVE_TRIVIAL_AUTO_VAR_INIT
 AC_STRERROR_R_RETURNS_STRING
+AC_HAVE_CLOSE_RANGE
+AC_HAVE_LISTMOUNT
+if test "$have_listmount" = "yes"; then
+	AC_HAVE_LISTMOUNT_NS_FD
+fi
+AC_HAVE_STATMOUNT_SUPPORTED_MASK
+AC_HAVE_FANOTIFY_MOUNTINFO
+AC_HAVE_QUOTACTL_FD
 
 if test "$enable_ubsan" = "yes" || test "$enable_ubsan" = "probe"; then
         AC_PACKAGE_CHECK_UBSAN

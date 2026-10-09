@@ -28,8 +28,8 @@
  * the filesystem if the btree root pointers in the AG headers are wrong.
  * Dependencies cannot cross scrub groups.
  */
-#define DEP(x) (1U << (x))
-static const unsigned int repair_deps[XFS_SCRUB_TYPE_NR] = {
+#define DEP(x) (1ULL << (x))
+static const uint64_t repair_deps[XFS_SCRUB_TYPE_NR] = {
 	[XFS_SCRUB_TYPE_BMBTD]		= DEP(XFS_SCRUB_TYPE_INODE),
 	[XFS_SCRUB_TYPE_BMBTA]		= DEP(XFS_SCRUB_TYPE_INODE),
 	[XFS_SCRUB_TYPE_BMBTC]		= DEP(XFS_SCRUB_TYPE_INODE),
@@ -110,7 +110,10 @@ repair_epilogue(
 	case EDEADLOCK:
 	case EBUSY:
 		/* Filesystem is busy, try again later. */
-		if (debug || verbose)
+		if (repair_flags & XRM_FINAL_WARNING)
+			str_error(ctx, descr_render(dsc),
+_("Filesystem is busy, repair incomplete."));
+		else if (debug || verbose)
 			str_info(ctx, descr_render(dsc),
 _("Filesystem is busy, deferring repair."));
 		return 0;
@@ -250,17 +253,18 @@ repair_item_dependencies_ok(
 	const struct scrub_item	*sri,
 	unsigned int		scrub_type)
 {
-	unsigned int		dep_mask = repair_deps[scrub_type];
+	uint64_t		dep_mask = repair_deps[scrub_type];
 	unsigned int		b;
 
 	for (b = 0; dep_mask && b < XFS_SCRUB_TYPE_NR; b++, dep_mask >>= 1) {
 		if (!(dep_mask & 1))
 			continue;
 		/*
-		 * If this lower level object also needs repair, we can't fix
-		 * the higher level item.
+		 * If this lower level object also needs repair or hasn't been
+		 * scanned yet, we can't fix the higher level item.
 		 */
-		if (sri->sri_state[b] & SCRUB_ITEM_NEEDSREPAIR)
+		if (sri->sri_state[b] & (SCRUB_ITEM_NEEDSREPAIR |
+					 SCRUB_ITEM_NEEDSCHECK))
 			return false;
 	}
 
@@ -434,7 +438,7 @@ repair_item_boost_priorities(
 	unsigned int			scrub_type;
 
 	foreach_scrub_type(scrub_type) {
-		unsigned int		dep_mask = repair_deps[scrub_type];
+		uint64_t		dep_mask = repair_deps[scrub_type];
 		unsigned int		b;
 
 		if (repair_item_count_needsrepair(sri) == 0 || !dep_mask)
@@ -719,7 +723,7 @@ action_list_process(
 {
 	struct action_item		*aitem;
 	struct action_item		*n;
-	int				ret;
+	int				ret = 0;
 
 	list_for_each_entry_safe(aitem, n, &alist->list, list) {
 		if (scrub_excessive_errors(ctx))
@@ -852,7 +856,11 @@ repair_item(
 	if (ret)
 		return ret;
 
-	return repair_item_class(ctx, sri, -1, SCRUB_ITEM_PREEN, flags);
+	ret = repair_item_class(ctx, sri, -1, SCRUB_ITEM_PREEN, flags);
+	if (ret)
+		return ret;
+
+	return repair_item_class(ctx, sri, -1, SCRUB_ITEM_NEEDSCHECK, flags);
 }
 
 /* Create an action item around a scrub item that needs repairs. */
@@ -865,7 +873,7 @@ repair_item_to_action_item(
 	struct action_item	*aitem;
 	unsigned int		scrub_type;
 
-	if (repair_item_count_needsrepair(sri) == 0)
+	if (repair_item_count_needswork(sri) == 0)
 		return 0;
 
 	aitem = malloc(sizeof(struct action_item));
@@ -890,6 +898,7 @@ repair_item_to_action_item(
 		if (state[scrub_type] & SCRUB_ITEM_NEEDSCHECK) {
 			state[scrub_type] &= ~SCRUB_ITEM_NEEDSCHECK;
 			state[scrub_type] |= SCRUB_ITEM_CORRUPT;
+			aitem->sri.sri_inconsistent = true;
 		}
 	}
 

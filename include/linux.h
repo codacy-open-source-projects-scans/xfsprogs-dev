@@ -32,7 +32,13 @@
 #ifdef OVERRIDE_SYSTEM_FSXATTR
 # define fsxattr sys_fsxattr
 #endif
-#include <linux/fs.h> /* fsxattr defintion for new kernels */
+#ifdef OVERRIDE_SYSTEM_STATMOUNT
+# define statmount sys_statmount
+#endif
+#include <linux/fs.h> /* fsxattr/statmount defintion for new kernels */
+#ifdef OVERRIDE_SYSTEM_STATMOUNT
+# undef statmount
+#endif
 #ifdef OVERRIDE_SYSTEM_FSXATTR
 # undef fsxattr
 #endif
@@ -250,6 +256,23 @@ struct file_attr {
 
 #ifndef FS_XFLAG_COWEXTSIZE
 #define FS_XFLAG_COWEXTSIZE	0x00010000	/* CoW extent size allocator hint */
+#endif
+
+#ifndef FS_XFLAG_VERITY
+#define FS_XFLAG_VERITY		0x00020000	/* fs-verity enabled */
+#endif
+
+/*
+ * Case handling flags (read-only, cannot be set via ioctl).
+ * Default (neither set) indicates POSIX semantics: case-sensitive
+ * lookups and case-preserving storage.
+ */
+#ifndef FS_XFLAG_CASEFOLD
+#define FS_XFLAG_CASEFOLD	0x00040000	/* case-insensitive lookups */
+#endif
+
+#ifndef FS_XFLAG_CASENONPRESERVING
+#define FS_XFLAG_CASENONPRESERVING 0x00080000	/* case not preserved */
 #endif
 
 /* Atomic Write */

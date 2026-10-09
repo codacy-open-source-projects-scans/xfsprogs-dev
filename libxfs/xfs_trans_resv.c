@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Red Hat, Inc.
  * All Rights Reserved.
  */
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -15,9 +15,9 @@
 #include "xfs_da_btree.h"
 #include "xfs_inode.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_quota.h"
 #include "xfs_trans.h"
 #include "xfs_trans_space.h"
-#include "xfs_quota_defs.h"
 #include "xfs_rtbitmap.h"
 #include "xfs_trace.h"
 #include "defer_item.h"

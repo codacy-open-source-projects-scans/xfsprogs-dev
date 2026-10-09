@@ -25,6 +25,7 @@ CFILES = \
 	fsuuid.c \
 	fsync.c \
 	getrusage.c \
+	healthmon.c \
 	imap.c \
 	init.c \
 	inject.c \
@@ -50,7 +51,8 @@ CFILES = \
 	sync.c \
 	sync_file_range.c \
 	truncate.c \
-	utimes.c
+	utimes.c \
+	verify_media.c
 
 LLDLIBS = $(LIBXCMD) $(LIBHANDLE) $(LIBFROG) $(LIBPTHREAD) $(LIBUUID)
 LTDEPENDENCIES = $(LIBXCMD) $(LIBHANDLE) $(LIBFROG)
@@ -86,6 +88,11 @@ endif
 
 ifeq ($(HAVE_GETFSMAP),yes)
 CFILES += fsmap.c
+endif
+
+ifeq ($(HAVE_LISTMOUNT),yes)
+CFILES += listmount.c
+LCFLAGS += -DHAVE_LISTMOUNT
 endif
 
 default: depend $(LTCOMMAND)

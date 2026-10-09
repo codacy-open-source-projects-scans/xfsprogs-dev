@@ -23,6 +23,7 @@
 #include "vfs.h"
 #include "common.h"
 #include "libfrog/bulkstat.h"
+#include "libfrog/ptvar.h"
 
 /*
  * Phase 6: Verify data file integrity.
@@ -39,82 +40,14 @@
 /* Verify disk blocks with GETFSMAP */
 
 struct media_verify_state {
-	struct read_verify_pool	*rvp_data;
-	struct read_verify_pool	*rvp_log;
-	struct read_verify_pool	*rvp_realtime;
-	struct bitmap		*d_bad;		/* bytes */
-	struct bitmap		*r_bad;		/* bytes */
-	bool			d_trunc:1;
-	bool			r_trunc:1;
-	bool			l_trunc:1;
+	struct ptvar		*verify_schedules;
+
+	struct read_verify_pool	*rvp[XFS_DEV_RT + 1];
 };
-
-/* Find the fd for a given device identifier. */
-static struct read_verify_pool *
-dev_to_pool(
-	struct scrub_ctx		*ctx,
-	struct media_verify_state	*vs,
-	dev_t				dev)
-{
-	if (ctx->mnt.fsgeom.rtstart) {
-		if (dev == XFS_DEV_DATA)
-			return vs->rvp_data;
-		if (dev == XFS_DEV_LOG)
-			return vs->rvp_log;
-		if (dev == XFS_DEV_RT)
-			return vs->rvp_realtime;
-	} else {
-		if (dev == ctx->fsinfo.fs_datadev)
-			return vs->rvp_data;
-		if (dev == ctx->fsinfo.fs_logdev)
-			return vs->rvp_log;
-		if (dev == ctx->fsinfo.fs_rtdev)
-			return vs->rvp_realtime;
-	}
-	abort();
-}
-
-/* Find the device major/minor for a given file descriptor. */
-static dev_t
-disk_to_dev(
-	struct scrub_ctx	*ctx,
-	struct disk		*disk)
-{
-	if (ctx->mnt.fsgeom.rtstart) {
-		if (disk == ctx->datadev)
-			return XFS_DEV_DATA;
-		if (disk == ctx->logdev)
-			return XFS_DEV_LOG;
-		if (disk == ctx->rtdev)
-			return XFS_DEV_RT;
-	} else {
-		if (disk == ctx->datadev)
-			return ctx->fsinfo.fs_datadev;
-		if (disk == ctx->logdev)
-			return ctx->fsinfo.fs_logdev;
-		if (disk == ctx->rtdev)
-			return ctx->fsinfo.fs_rtdev;
-	}
-	abort();
-}
-
-/* Find the incore bad blocks bitmap for a given disk. */
-static struct bitmap *
-bitmap_for_disk(
-	struct scrub_ctx		*ctx,
-	struct disk			*disk,
-	struct media_verify_state	*vs)
-{
-	if (disk == ctx->datadev)
-		return vs->d_bad;
-	if (disk == ctx->rtdev)
-		return vs->r_bad;
-	return NULL;
-}
 
 struct disk_ioerr_report {
 	struct scrub_ctx	*ctx;
-	struct disk		*disk;
+	enum xfs_device		dev;
 };
 
 struct owner_decode {
@@ -123,16 +56,16 @@ struct owner_decode {
 };
 
 static const struct owner_decode special_owners[] = {
-	{XFS_FMR_OWN_FREE,	"free space"},
-	{XFS_FMR_OWN_UNKNOWN,	"unknown owner"},
-	{XFS_FMR_OWN_FS,	"static FS metadata"},
-	{XFS_FMR_OWN_LOG,	"journalling log"},
-	{XFS_FMR_OWN_AG,	"per-AG metadata"},
-	{XFS_FMR_OWN_INOBT,	"inode btree blocks"},
-	{XFS_FMR_OWN_INODES,	"inodes"},
-	{XFS_FMR_OWN_REFC,	"refcount btree"},
-	{XFS_FMR_OWN_COW,	"CoW staging"},
-	{XFS_FMR_OWN_DEFECTIVE,	"bad blocks"},
+	{XFS_FMR_OWN_FREE,	N_("free space")},
+	{XFS_FMR_OWN_UNKNOWN,	N_("unknown owner")},
+	{XFS_FMR_OWN_FS,	N_("static FS metadata")},
+	{XFS_FMR_OWN_LOG,	N_("journalling log")},
+	{XFS_FMR_OWN_AG,	N_("per-AG metadata")},
+	{XFS_FMR_OWN_INOBT,	N_("inode btree blocks")},
+	{XFS_FMR_OWN_INODES,	N_("inodes")},
+	{XFS_FMR_OWN_REFC,	N_("refcount btree")},
+	{XFS_FMR_OWN_COW,	N_("CoW staging")},
+	{XFS_FMR_OWN_DEFECTIVE,	N_("bad blocks")},
 	{0, NULL},
 };
 
@@ -145,7 +78,7 @@ decode_special_owner(
 
 	while (od->descr) {
 		if (od->owner == owner)
-			return od->descr;
+			return _(od->descr);
 		od++;
 	}
 
@@ -190,6 +123,13 @@ _("media error at data offset %llu length %llu."),
 	return 0;
 }
 
+static inline enum xfs_device from_fsx(const struct fsxattr *fsx)
+{
+	if (fsx->fsx_xflags & FS_XFLAG_REALTIME)
+		return XFS_DEV_RT;
+	return XFS_DEV_DATA;
+}
+
 /* Report if this extent overlaps a bad region. */
 static int
 report_data_loss(
@@ -202,7 +142,6 @@ report_data_loss(
 {
 	struct badfile_report		*br = arg;
 	struct media_verify_state	*vs = br->vs;
-	struct bitmap			*bmp;
 
 	br->bmap = bmap;
 
@@ -210,13 +149,9 @@ report_data_loss(
 	if (bmap->bm_flags & (BMV_OF_PREALLOC | BMV_OF_DELALLOC))
 		return 0;
 
-	if (fsx->fsx_xflags & FS_XFLAG_REALTIME)
-		bmp = vs->r_bad;
-	else
-		bmp = vs->d_bad;
-
-	return -bitmap_iterate_range(bmp, bmap->bm_physical, bmap->bm_length,
-			report_badfile, br);
+	return read_verify_iterate_failed_range(vs->rvp[from_fsx(fsx)],
+			bmap->bm_physical, bmap->bm_length, report_badfile,
+			br);
 }
 
 /* Report if the extended attribute data overlaps a bad region. */
@@ -231,7 +166,6 @@ report_attr_loss(
 {
 	struct badfile_report		*br = arg;
 	struct media_verify_state	*vs = br->vs;
-	struct bitmap			*bmp = vs->d_bad;
 
 	/* Complain about attr fork extents that don't look right. */
 	if (bmap->bm_flags & (BMV_OF_PREALLOC | BMV_OF_DELALLOC)) {
@@ -246,7 +180,8 @@ _("found unexpected realtime attr fork extent."));
 		return 0;
 	}
 
-	if (bitmap_test(bmp, bmap->bm_physical, bmap->bm_length))
+	if (read_verify_has_failed(vs->rvp[XFS_DEV_DATA], bmap->bm_physical,
+				bmap->bm_length))
 		str_corrupt(ctx, br->descr,
 _("media error in extended attribute data."));
 
@@ -431,6 +366,7 @@ report_ioerr_fsmap(
 	char			buf[DESCR_BUFSZ];
 	struct ioerr_filerange	*fr = arg;
 	uint64_t		err_off;
+	uint64_t		err_len;
 	int			ret;
 
 	/* Don't care about unwritten extents. */
@@ -459,6 +395,8 @@ report_ioerr_fsmap(
 		} else {
 			str_corrupt(ctx, buf, _("media error in %s."), type);
 		}
+
+		return 0;
 	}
 
 	if (can_use_pptrs(ctx)) {
@@ -477,6 +415,8 @@ report_ioerr_fsmap(
 				attr ? _("extended attribute") :
 				       _("file data"));
 		str_corrupt(ctx, buf, _("media error in extent map"));
+
+		return 0;
 	}
 
 	/*
@@ -495,9 +435,12 @@ report_ioerr_fsmap(
 		return 0;
 	}
 
+	err_len = min(fr->physical + fr->length,
+		      map->fmr_physical + map->fmr_length) -
+		  max(fr->physical, map->fmr_physical);
 	str_unfixable_error(ctx, buf,
  _("media error at data offset %llu length %llu."),
-			err_off, fr->length);
+			map->fmr_offset + err_off, err_len);
 	return 0;
 }
 
@@ -519,7 +462,7 @@ report_ioerr(
 	struct disk_ioerr_report	*dioerr = arg;
 
 	/* Go figure out which blocks are bad from the fsmap. */
-	keys[0].fmr_device = disk_to_dev(dioerr->ctx, dioerr->disk);
+	keys[0].fmr_device = to_fsmap_dev(dioerr->ctx, dioerr->dev);
 	keys[0].fmr_physical = start;
 	keys[1].fmr_device = keys[0].fmr_device;
 	keys[1].fmr_physical = start + length - 1;
@@ -530,25 +473,38 @@ report_ioerr(
 			&fr);
 }
 
+static inline const char *trunc_msg(enum xfs_device dev)
+{
+	switch (dev) {
+	case XFS_DEV_DATA:
+		return _("data device truncated");
+	case XFS_DEV_LOG:
+		return _("log device truncated");
+	case XFS_DEV_RT:
+		return _("rt device truncated");
+	}
+	abort();
+}
+
 /* Report all the media errors found on a disk. */
 static int
 report_disk_ioerrs(
 	struct scrub_ctx		*ctx,
-	struct disk			*disk,
-	struct media_verify_state	*vs)
+	struct media_verify_state	*vs,
+	enum xfs_device			dev)
 {
 	struct disk_ioerr_report	dioerr = {
 		.ctx			= ctx,
-		.disk			= disk,
+		.dev			= dev,
 	};
-	struct bitmap			*tree;
 
-	if (!disk)
+	if (!vs->rvp[dev])
 		return 0;
-	tree = bitmap_for_disk(ctx, disk, vs);
-	if (!tree)
-		return 0;
-	return -bitmap_iterate(tree, report_ioerr, &dioerr);
+
+	if (read_verify_truncated(vs->rvp[dev]))
+		str_corrupt(ctx, ctx->mntpoint, trunc_msg(dev));
+
+	return read_verify_iterate_failed(vs->rvp[dev], report_ioerr, &dioerr);
 }
 
 /* Given bad extent lists for the data & rtdev, find bad files. */
@@ -559,22 +515,21 @@ report_all_media_errors(
 {
 	int				ret;
 
-	if (vs->d_trunc)
-		str_corrupt(ctx, ctx->mntpoint, _("data device truncated"));
-	if (vs->l_trunc)
-		str_corrupt(ctx, ctx->mntpoint, _("log device truncated"));
-	if (vs->r_trunc)
-		str_corrupt(ctx, ctx->mntpoint, _("rt device truncated"));
-
-	ret = report_disk_ioerrs(ctx, ctx->datadev, vs);
+	ret = report_disk_ioerrs(ctx, vs, XFS_DEV_DATA);
 	if (ret) {
-		str_liberror(ctx, ret, _("walking datadev io errors"));
+		str_liberror(ctx, ret, _("walking data device io errors"));
 		return ret;
 	}
 
-	ret = report_disk_ioerrs(ctx, ctx->rtdev, vs);
+	ret = report_disk_ioerrs(ctx, vs, XFS_DEV_LOG);
 	if (ret) {
-		str_liberror(ctx, ret, _("walking rtdev io errors"));
+		str_liberror(ctx, ret, _("walking log device io errors"));
+		return ret;
+	}
+
+	ret = report_disk_ioerrs(ctx, vs, XFS_DEV_RT);
+	if (ret) {
+		str_liberror(ctx, ret, _("walking rt device io errors"));
 		return ret;
 	}
 
@@ -603,10 +558,11 @@ check_rmap(
 	void				*arg)
 {
 	struct media_verify_state	*vs = arg;
-	struct read_verify_pool		*rvp;
+	struct read_verify_pool		*rvp =
+		vs->rvp[from_fsmap_dev(ctx, map->fmr_device)];
+	struct read_verify_schedule	*rs;
+	bool				scheduled;
 	int				ret;
-
-	rvp = dev_to_pool(ctx, vs, map->fmr_device);
 
 	dbg_printf("rmap dev %d:%d phys %"PRIu64" owner %"PRId64
 			" offset %"PRIu64" len %"PRIu64" flags 0x%x\n",
@@ -616,9 +572,14 @@ check_rmap(
 			map->fmr_flags);
 
 	/* "Unknown" extents should be verified; they could be data. */
-	if ((map->fmr_flags & FMR_OF_SPECIAL_OWNER) &&
-			map->fmr_owner == XFS_FMR_OWN_UNKNOWN)
-		map->fmr_flags &= ~FMR_OF_SPECIAL_OWNER;
+	if ((map->fmr_flags & FMR_OF_SPECIAL_OWNER)) {
+		switch (map->fmr_owner) {
+		case XFS_FMR_OWN_UNKNOWN:
+		case XFS_FMR_OWN_LOG:
+			map->fmr_flags &= ~FMR_OF_SPECIAL_OWNER;
+			break;
+		}
+	}
 
 	/*
 	 * We only care about read-verifying data extents that have been
@@ -632,80 +593,84 @@ check_rmap(
 
 	/* XXX: Filter out directory data blocks. */
 
+	rs = ptvar_get(vs->verify_schedules, &ret);
+	if (ret) {
+		str_liberror(ctx, -ret, _("grabbing media verify schedule"));
+		return -ret;
+	}
+
 	/* Schedule the read verify command for (eventual) running. */
-	ret = read_verify_schedule_io(rvp, map->fmr_physical, map->fmr_length,
-			vs);
+	scheduled = try_read_verify_schedule_io(rs, rvp, map->fmr_physical,
+			map->fmr_length);
+	if (scheduled)
+		return 0;
+
+	ret = read_verify_schedule_now(rs);
 	if (ret) {
 		str_liberror(ctx, ret, _("scheduling media verify command"));
 		return ret;
 	}
 
+	scheduled = try_read_verify_schedule_io(rs, rvp, map->fmr_physical,
+			map->fmr_length);
+	assert(scheduled);
 	return 0;
+}
+
+/* Initiate any scheduled verifications now. */
+static int
+force_one_verify(
+	struct ptvar			*ptv,
+	void				*data,
+	void				*foreach_arg)
+{
+	struct read_verify_schedule	*rs = data;
+
+	return -read_verify_schedule_now(rs);
 }
 
 /* Wait for read/verify actions to finish, then return # bytes checked. */
 static int
 clean_pool(
-	struct read_verify_pool	*rvp,
-	unsigned long long	*bytes_checked)
+	struct media_verify_state	*vs,
+	enum xfs_device			dev,
+	unsigned long long		*bytes_checked,
+	bool				*ok)
 {
-	uint64_t		pool_checked;
-	int			ret;
+	struct read_verify_pool		*rvp = vs->rvp[dev];
+	int				ret;
 
 	if (!rvp)
 		return 0;
 
-	ret = read_verify_force_io(rvp);
+	ret = read_verify_pool_flush(rvp);
 	if (ret)
 		return ret;
 
-	ret = read_verify_pool_flush(rvp);
-	if (ret)
-		goto out_destroy;
-
-	ret = read_verify_bytes(rvp, &pool_checked);
-	if (ret)
-		goto out_destroy;
-
-	*bytes_checked += pool_checked;
-out_destroy:
-	read_verify_pool_destroy(rvp);
-	return ret;
+	*bytes_checked += read_verify_progress(rvp);
+	if (!read_verify_ok(rvp))
+		*ok = false;
+	return 0;
 }
 
-/* Remember a media error for later. */
-static void
-remember_ioerr(
+static inline int
+alloc_pool(
 	struct scrub_ctx		*ctx,
-	struct disk			*disk,
-	uint64_t			start,
-	uint64_t			length,
-	int				error,
-	void				*arg)
+	struct media_verify_state	*vs,
+	enum xfs_device			dev)
 {
-	struct media_verify_state	*vs = arg;
-	struct bitmap			*tree;
-	int				ret;
+	return read_verify_pool_alloc(ctx, dev, &vs->rvp[dev]);
+}
 
-	if (!length) {
-		if (disk == ctx->datadev)
-			vs->d_trunc = true;
-		else if (disk == ctx->logdev)
-			vs->l_trunc = true;
-		else if (disk == ctx->rtdev)
-			vs->r_trunc = true;
-		return;
+static inline void
+free_pool(
+	struct media_verify_state	*vs,
+	enum xfs_device			dev)
+{
+	if (vs->rvp[dev]) {
+		read_verify_pool_abort(vs->rvp[dev]);
+		read_verify_pool_destroy(vs->rvp[dev]);
 	}
-
-	tree = bitmap_for_disk(ctx, disk, vs);
-	if (!tree) {
-		str_liberror(ctx, ENOENT, _("finding bad block bitmap"));
-		return;
-	}
-
-	ret = -bitmap_set(tree, start, length);
-	if (ret)
-		str_liberror(ctx, ret, _("setting bad block bitmap"));
 }
 
 /*
@@ -721,96 +686,82 @@ phase6_func(
 	struct scrub_ctx		*ctx)
 {
 	struct media_verify_state	vs = { NULL };
+	bool				ok = true;
 	int				ret, ret2, ret3;
 
-	ret = -bitmap_alloc(&vs.d_bad);
+	ret = alloc_pool(ctx, &vs, XFS_DEV_DATA);
 	if (ret) {
-		str_liberror(ctx, ret, _("creating datadev badblock bitmap"));
+		str_liberror(ctx, ret, _("creating data device media verifier"));
 		return ret;
 	}
-
-	ret = -bitmap_alloc(&vs.r_bad);
-	if (ret) {
-		str_liberror(ctx, ret, _("creating realtime badblock bitmap"));
-		goto out_dbad;
-	}
-
-	ret = read_verify_pool_alloc(ctx, ctx->datadev,
-			ctx->mnt.fsgeom.blocksize, remember_ioerr,
-			scrub_nproc(ctx), &vs.rvp_data);
-	if (ret) {
-		str_liberror(ctx, ret, _("creating datadev media verifier"));
-		goto out_rbad;
-	}
-	if (ctx->logdev) {
-		ret = read_verify_pool_alloc(ctx, ctx->logdev,
-				ctx->mnt.fsgeom.blocksize, remember_ioerr,
-				scrub_nproc(ctx), &vs.rvp_log);
+	if (ctx->fsinfo.fs_log) {
+		ret = alloc_pool(ctx, &vs, XFS_DEV_LOG);
 		if (ret) {
 			str_liberror(ctx, ret,
-					_("creating logdev media verifier"));
+					_("creating log device media verifier"));
 			goto out_datapool;
 		}
 	}
-	if (ctx->rtdev) {
-		ret = read_verify_pool_alloc(ctx, ctx->rtdev,
-				ctx->mnt.fsgeom.blocksize, remember_ioerr,
-				scrub_nproc(ctx), &vs.rvp_realtime);
+	if (ctx->fsinfo.fs_rt || ctx->mnt.fsgeom.rtstart) {
+		ret = alloc_pool(ctx, &vs, XFS_DEV_RT);
 		if (ret) {
 			str_liberror(ctx, ret,
-					_("creating rtdev media verifier"));
+					_("creating rt device media verifier"));
 			goto out_logpool;
 		}
 	}
-	ret = scrub_scan_all_spacemaps(ctx, check_rmap, &vs);
+
+	ret = -ptvar_alloc(scrub_scan_spacemaps_nproc(ctx),
+			sizeof(struct read_verify_schedule), NULL,
+			&vs.verify_schedules);
 	if (ret)
 		goto out_rtpool;
 
-	ret = clean_pool(vs.rvp_data, &ctx->bytes_checked);
+	ret = scrub_scan_all_spacemaps(ctx, check_rmap, &vs);
 	if (ret)
-		str_liberror(ctx, ret, _("flushing datadev verify pool"));
+		goto out_schedules;
 
-	ret2 = clean_pool(vs.rvp_log, &ctx->bytes_checked);
+	ret = -ptvar_foreach(vs.verify_schedules, force_one_verify, NULL);
+	if (ret) {
+		str_liberror(ctx, ret, _("flushing read verify commands"));
+		goto out_schedules;
+	}
+	ptvar_free(vs.verify_schedules);
+	vs.verify_schedules = NULL;
+
+	ret = clean_pool(&vs, XFS_DEV_DATA, &ctx->bytes_checked, &ok);
+	if (ret)
+		str_liberror(ctx, ret, _("flushing data device verify pool"));
+
+	ret2 = clean_pool(&vs, XFS_DEV_LOG, &ctx->bytes_checked, &ok);
 	if (ret2)
-		str_liberror(ctx, ret2, _("flushing logdev verify pool"));
+		str_liberror(ctx, ret2, _("flushing log device verify pool"));
 
-	ret3 = clean_pool(vs.rvp_realtime, &ctx->bytes_checked);
+	ret3 = clean_pool(&vs, XFS_DEV_RT, &ctx->bytes_checked, &ok);
 	if (ret3)
-		str_liberror(ctx, ret3, _("flushing rtdev verify pool"));
+		str_liberror(ctx, ret3, _("flushing rt device verify pool"));
 
 	/*
 	 * If the verify flush didn't work or we found no bad blocks, we're
 	 * done!  No errors detected.
 	 */
-	if (ret || ret2 || ret3)
-		goto out_rbad;
-	if (bitmap_empty(vs.d_bad) && bitmap_empty(vs.r_bad))
-		goto out_rbad;
+	if (ret || ret2 || ret3 || ok) {
+		ret |= ret2 | ret3; /* caller only cares about non-zero/zero */
+		goto out_rtpool;
+	}
 
 	/* Scan the whole dir tree to see what matches the bad extents. */
 	ret = report_all_media_errors(ctx, &vs);
+	goto out_rtpool;
 
-	bitmap_free(&vs.r_bad);
-	bitmap_free(&vs.d_bad);
-	return ret;
-
+out_schedules:
+	ptvar_free(vs.verify_schedules);
 out_rtpool:
-	if (vs.rvp_realtime) {
-		read_verify_pool_abort(vs.rvp_realtime);
-		read_verify_pool_destroy(vs.rvp_realtime);
-	}
+	free_pool(&vs, XFS_DEV_RT);
 out_logpool:
-	if (vs.rvp_log) {
-		read_verify_pool_abort(vs.rvp_log);
-		read_verify_pool_destroy(vs.rvp_log);
-	}
+	free_pool(&vs, XFS_DEV_LOG);
 out_datapool:
-	read_verify_pool_abort(vs.rvp_data);
-	read_verify_pool_destroy(vs.rvp_data);
-out_rbad:
-	bitmap_free(&vs.r_bad);
-out_dbad:
-	bitmap_free(&vs.d_bad);
+	free_pool(&vs, XFS_DEV_DATA);
 	return ret;
 }
 
@@ -827,10 +778,11 @@ phase6_estimate(
 	unsigned long long	r_blocks;
 	unsigned long long	r_bfree;
 	unsigned long long	dontcare;
+	unsigned long long	l_blocks;
 	int			ret;
 
 	ret = scrub_scan_estimate_blocks(ctx, &d_blocks, &d_bfree, &r_blocks,
-			&r_bfree, &dontcare);
+			&r_bfree, &dontcare, &l_blocks);
 	if (ret) {
 		str_liberror(ctx, ret, _("estimating verify work"));
 		return ret;
@@ -839,16 +791,20 @@ phase6_estimate(
 	*items = cvt_off_fsb_to_b(&ctx->mnt,
 			(d_blocks - d_bfree) + (r_blocks - r_bfree));
 
+	/* count external logs now that we scan them */
+	if (ctx->fsinfo.fs_log)
+		*items += cvt_off_fsb_to_b(&ctx->mnt, l_blocks);
+
 	/*
 	 * Each read-verify pool starts a thread pool, and each worker thread
 	 * can contribute to the progress counter.  Hence we need to set
 	 * nr_threads appropriately to handle that many threads.
 	 */
-	*nr_threads = disk_heads(ctx->datadev);
-	if (ctx->rtdev)
-		*nr_threads += disk_heads(ctx->rtdev);
-	if (ctx->logdev)
-		*nr_threads += disk_heads(ctx->logdev);
+	*nr_threads = read_verify_nproc(ctx);
+	if (ctx->fsinfo.fs_rt || ctx->mnt.fsgeom.rtstart)
+		*nr_threads += read_verify_nproc(ctx);
+	if (ctx->fsinfo.fs_log)
+		*nr_threads += read_verify_nproc(ctx);
 	*rshift = 20;
 	return 0;
 }

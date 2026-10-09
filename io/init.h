@@ -8,10 +8,10 @@
 #define CMD_NOMAP_OK	(1<<1)	/* command doesn't need a mapped region	*/
 #define CMD_FOREIGN_OK	CMD_FLAG_FOREIGN_OK
 
-extern char	*progname;
-extern int	exitcode;
-extern int	expert;
-extern size_t	pagesize;
+extern char *progname;
+extern int exitcode;
+extern int expert;
+extern size_t pagesize;
 extern struct timeval stopwatch;
 
-extern void init_cvtnum(size_t *blocksize, size_t *sectsize);
+void init_cvtnum(size_t *blocksize, size_t *sectsize);

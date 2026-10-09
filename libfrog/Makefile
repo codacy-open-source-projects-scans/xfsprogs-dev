@@ -19,11 +19,13 @@ bulkstat.c \
 convert.c \
 crc32.c \
 file_exchange.c \
+flagmap.c \
 fsgeom.c \
 fsproperties.c \
 fsprops.c \
 getparents.c \
 histogram.c \
+healthevent.c \
 file_attr.c \
 list_sort.c \
 linux.c \
@@ -31,9 +33,11 @@ logging.c \
 paths.c \
 projects.c \
 ptvar.c \
+quotactl.c \
 radix-tree.c \
 randbytes.c \
 scrub.c \
+systemd.c \
 util.c \
 workqueue.c \
 zones.c
@@ -51,21 +55,25 @@ dahashselftest.h \
 div64.h \
 fakelibattr.h \
 file_exchange.h \
+flagmap.h \
 fsgeom.h \
 fsproperties.h \
 fsprops.h \
 getparents.h \
 handle_priv.h \
+healthevent.h \
 histogram.h \
 file_attr.h \
 logging.h \
 paths.h \
 projects.h \
 ptvar.h \
+quotactl.h \
 radix-tree.h \
 randbytes.h \
 scrub.h \
 statx.h \
+systemd.h \
 workqueue.h \
 zones.h
 
@@ -80,6 +88,28 @@ ifeq ($(ENABLE_GETTEXT),yes)
 HAVE_GETTEXT = True
 else
 HAVE_GETTEXT = False
+endif
+
+ifeq ($(HAVE_GETRANDOM_NONBLOCK),yes)
+LCFLAGS += -DHAVE_GETRANDOM_NONBLOCK
+endif
+
+ifeq ($(HAVE_CLOSE_RANGE),yes)
+CFLAGS += -DHAVE_CLOSE_RANGE
+endif
+
+ifeq ($(HAVE_LISTMOUNT),yes)
+CFLAGS += -DHAVE_LISTMOUNT
+CFILES += statmount.c
+HFILES += statmount.h
+endif
+
+ifeq ($(HAVE_LISTMOUNT_NS_FD),yes)
+CFLAGS+=-DHAVE_LISTMOUNT_NS_FD
+endif
+
+ifeq ($(HAVE_QUOTACTL_FD),yes)
+CFLAGS += -DHAVE_QUOTACTL_FD
 endif
 
 default: ltdepend $(LTLIBRARY) $(GETTEXT_PY)

@@ -347,3 +347,151 @@ puts(strerror_r(0, buf, sizeof(buf)));
     CFLAGS="$OLD_CFLAGS"
     AC_SUBST(strerror_r_returns_string)
   ])
+
+#
+# Check if close_range exists
+#
+AC_DEFUN([AC_HAVE_CLOSE_RANGE],
+  [AC_MSG_CHECKING([for close_range])
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <linux/close_range.h>
+  ]], [[
+close_range(0, 0, 0);
+  ]])
+    ], have_close_range=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_close_range)
+  ])
+
+#
+# Check if listmount and statmount exist.  Note that statmount came first (6.8)
+# and listmount came later (6.9), so we'll refuse both if either is missing.
+#
+AC_DEFUN([AC_HAVE_LISTMOUNT],
+  [AC_MSG_CHECKING([for listmount])
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <linux/mount.h>
+#include <sys/syscall.h>
+#include <alloca.h>
+  ]], [[
+	struct mnt_id_req	req = {
+		.size		= sizeof(req),
+	};
+	struct statmount	smbuf;
+
+	syscall(SYS_statmount, &req, &smbuf, 0, 0);
+	syscall(SYS_listmount, &req, NULL, 0, 0);
+  ]])
+    ], have_listmount=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_listmount)
+  ])
+
+#
+# Check if mnt_id_req::mnt_ns_fd exists.  This replaced mnt_id_req::spare in
+# 6.18, though earlier kernels allowed userspace to assign to spare.
+#
+AC_DEFUN([AC_HAVE_LISTMOUNT_NS_FD],
+  [AC_MSG_CHECKING([for struct mnt_id_req::mnt_ns_fd])
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <linux/mount.h>
+#include <sys/syscall.h>
+#include <alloca.h>
+  ]], [[
+	struct mnt_id_req	req = {
+		.mnt_ns_fd	= 555,
+	};
+
+	syscall(SYS_listmount, &req, NULL, 0, 0);
+  ]])
+    ], have_listmount_ns_fd=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_listmount_ns_fd)
+  ])
+
+#
+# Check if statmount::supported_mask (and hence sb_source) exists.  We need
+# sb_source for xfs_healer_start; and supported_mask for the xfs_io wrapper.
+# sb_source was added in 6.13 and supported_mask in 6.15.
+#
+AC_DEFUN([AC_HAVE_STATMOUNT_SUPPORTED_MASK],
+  [AC_MSG_CHECKING([for struct statmount::supported_mask])
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <linux/mount.h>
+#include <sys/syscall.h>
+#include <alloca.h>
+  ]], [[
+	struct mnt_id_req	req = {
+		.mnt_ns_fd	= 555,
+	};
+	struct statmount	smbuf = {
+		.supported_mask	= 1,
+	};
+
+	syscall(SYS_statmount, &req, &smbuf, 0, 0);
+  ]])
+    ], have_statmount_supported_mask=yes
+       AC_MSG_RESULT(yes),
+       need_internal_statmount=yes
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_statmount_supported_mask)
+    AC_SUBST(need_internal_statmount)
+  ])
+
+#
+# Check if fanotify will give us mount notifications (6.15).
+#
+AC_DEFUN([AC_HAVE_FANOTIFY_MOUNTINFO],
+  [AC_MSG_CHECKING([for fanotify mount events])
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <stdlib.h>
+#include <fcntl.h>
+#include <sys/fanotify.h>
+  ]], [[
+	struct fanotify_event_info_mnt info;
+
+	int fan_fd = fanotify_init(FAN_REPORT_MNT, 0);
+	fanotify_mark(fan_fd, FAN_MARK_ADD | FAN_MARK_MNTNS, FAN_MNT_ATTACH,
+			-1, NULL);
+  ]])
+    ], have_fanotify_mountinfo=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_fanotify_mountinfo)
+  ])
+
+#
+# Check if we have a quotactl_fd system call (5.14).
+#
+AC_DEFUN([AC_HAVE_QUOTACTL_FD],
+  [AC_MSG_CHECKING([for quotactl_fd])
+    AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <sys/syscall.h>
+#include <unistd.h>
+  ]], [[
+	return syscall(SYS_quotactl_fd);
+  ]])
+    ], have_quotactl_fd=yes
+       AC_MSG_RESULT(yes),
+       AC_MSG_RESULT(no))
+    AC_SUBST(have_quotactl_fd)
+  ])

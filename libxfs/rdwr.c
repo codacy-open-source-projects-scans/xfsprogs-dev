@@ -5,7 +5,7 @@
  */
 
 
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "init.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
@@ -17,9 +17,8 @@
 #include "xfs_inode_fork.h"
 #include "xfs_inode.h"
 #include "xfs_trans.h"
+#include "xfs_buf_mem.h"
 #include "libfrog/platform.h"
-#include "libxfs/xfile.h"
-#include "libxfs/buf_mem.h"
 #include "libxfs.h"
 
 static void libxfs_brelse(struct cache_node *node);

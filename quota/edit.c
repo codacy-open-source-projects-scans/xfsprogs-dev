@@ -140,6 +140,7 @@ set_limits(
 	uint32_t	id,
 	uint		type,
 	uint		mask,
+	int		mnt_fd,
 	char		*dev,
 	uint64_t	*bsoft,
 	uint64_t	*bhard,
@@ -162,7 +163,7 @@ set_limits(
 	d.d_rtb_hardlimit = *rtbhard;
 	d.d_rtb_softlimit = *rtbsoft;
 
-	if (xfsquotactl(XFS_SETQLIM, dev, type, id, (void *)&d) < 0) {
+	if (xfsquotactl(mnt_fd, dev, XFS_SETQLIM, type, id, (void *)&d) < 0) {
 		exitcode = 1;
 		fprintf(stderr, _("%s: cannot set limits: %s\n"),
 				progname, strerror(errno));
@@ -310,7 +311,7 @@ limit_f(
 	if (id == -1)
 		return 0;
 
-	set_limits(id, type, mask, fs_path->fs_name,
+	set_limits(id, type, mask, fs_path->mnt_fd, fs_path->fs_name,
 		   &bsoft, &bhard, &isoft, &ihard, &rtbsoft, &rtbhard);
 	return 0;
 }
@@ -356,7 +357,7 @@ restore_file(
 			mask = FS_DQ_ISOFT|FS_DQ_IHARD|FS_DQ_BSOFT|FS_DQ_BHARD;
 			if (cnt == 7)
 				mask |= FS_DQ_RTBSOFT|FS_DQ_RTBHARD;
-			set_limits(id, type, mask, dev, &bsoft, &bhard,
+			set_limits(id, type, mask, -1, dev, &bsoft, &bhard,
 					&isoft, &ihard, &rtbsoft, &rtbhard);
 		}
 	}
@@ -469,11 +470,12 @@ set_timer(
 	uint32_t		id,
 	uint			type,
 	uint			mask,
-	char			*dev,
+	const struct fs_path	*mount,
 	time64_t		value)
 {
 	struct fs_disk_quota	d;
 	time64_t		btimer, itimer, rtbtimer;
+	int			ret;
 
 	memset(&d, 0, sizeof(d));
 
@@ -485,7 +487,8 @@ set_timer(
 		time_t	now;
 
 		/* Get quota to find out whether user is past soft limits */
-		if (xfsquotactl(XFS_GETQUOTA, dev, type, id, (void *)&d) < 0) {
+		ret = xfrog_quotactl(mount, XFS_GETQUOTA, type, id, &d);
+		if (ret < 0) {
 			exitcode = 1;
 			fprintf(stderr, _("%s: cannot get quota: %s\n"),
 					progname, strerror(errno));
@@ -517,7 +520,8 @@ set_timer(
 	d.d_id = id;
 	encode_timers(&d, btimer, itimer, rtbtimer);
 
-	if (xfsquotactl(XFS_SETQLIM, dev, type, id, (void *)&d) < 0) {
+	ret = xfrog_quotactl(mount, XFS_SETQLIM, type, id, &d);
+	if (ret < 0) {
 		exitcode = 1;
 		fprintf(stderr, _("%s: cannot set timer: %s\n"),
 				progname, strerror(errno));
@@ -601,19 +605,20 @@ timer_f(
 	if (id == -1)
 		return 0;
 
-	set_timer(id, type, mask, fs_path->fs_name, value);
+	set_timer(id, type, mask, fs_path, value);
 	return 0;
 }
 
 static void
 set_warnings(
-	uint32_t	id,
-	uint		type,
-	uint		mask,
-	char		*dev,
-	uint		value)
+	uint32_t		id,
+	uint			type,
+	uint			mask,
+	const struct fs_path	*mount,
+	uint			value)
 {
-	fs_disk_quota_t	d;
+	struct fs_disk_quota	d;
+	int			ret;
 
 	memset(&d, 0, sizeof(d));
 	d.d_version = FS_DQUOT_VERSION;
@@ -624,7 +629,8 @@ set_warnings(
 	d.d_bwarns = value;
 	d.d_rtbwarns = value;
 
-	if (xfsquotactl(XFS_SETQLIM, dev, type, id, (void *)&d) < 0) {
+	ret = xfrog_quotactl(mount, XFS_SETQLIM, type, id, &d);
+	if (ret < 0) {
 		exitcode = 1;
 		fprintf(stderr, _("%s: cannot set warnings: %s\n"),
 				progname, strerror(errno));
@@ -699,7 +705,7 @@ warn_f(
 	if (id == -1)
 		return 0;
 
-	set_warnings(id, type, mask, fs_path->fs_name, value);
+	set_warnings(id, type, mask, fs_path, value);
 	return 0;
 }
 

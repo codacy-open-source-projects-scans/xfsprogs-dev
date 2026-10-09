@@ -353,7 +353,7 @@ Prints the block mapping for the current open file. Refer to the
 .BR xfs_bmap (8)
 manual page for complete documentation.
 .TP
-.BI "fiemap [ \-alv ] [ \-n " nx " ] [ " offset " [ " len " ]]"
+.BI "fiemap [ \-alev ] [ \-n " nx " ] [ " offset " [ " len " ]]"
 Prints the block mapping for the current open file using the fiemap
 ioctl.  Options behave as described in the
 .BR xfs_bmap (8)
@@ -1357,12 +1357,79 @@ Only available in expert mode and requires privileges.
 Undo the effects of a filesystem freeze operation.
 Only available in expert mode and requires privileges.
 .TP
+.BI "healthmon [ \-c " bufsize " ] [ \-c ] [ \-d " delay_ms " ] [ \-p ] [ \-v ]"
+Watch for filesystem health events and write them to the console.
+.RE
+.RS 1.0i
+.PD 0
+.TP
+.BI "\-b " bufsize
+Use a buffer of this size to read events from the kernel.
+.TP
+.BI \-c
+Close the open file and replace it with the monitor file.
+.TP
+.BI "\-d " delay_ms
+Sleep for this long between read attempts.
+.TP
+.B \-p
+Probe for the existence of the functionality by opening the monitoring fd and
+closing it immediately.
+.TP
+.BI \-v
+Request all health events, even if nothing changed.
+.PD
+.RE
+
+.TP
 .BI "inject [ " tag " ]"
 Inject errors into a filesystem to observe filesystem behavior at
 specific points under adverse conditions. Without the
 .I tag
 argument, displays the list of error tags available.
 Only available in expert mode and requires privileges.
+
+.TP
+.BI "verifymedia [ \-bdlrsR ] [ " start " [ " end " ]]"
+Check for media errors on the storage devices backing XFS.
+The
+.I start
+and
+.I end
+parameters are the range of physical storage to verify, in bytes.
+The
+.I start
+parameter is inclusive.
+The
+.I end
+parameter is exclusive.
+If neither
+.IR start " nor " end
+are specified, the entire device will be verified.
+.RE
+.RS 1.0i
+.PD 0
+.TP
+.B \-b
+Don't issue any IOs larger than this size.
+.TP
+.B \-d
+Verify the data device.
+This is the default.
+.TP
+.B \-l
+Verify the log device instead of the data device.
+.TP
+.B \-r
+Verify the realtime device instead of the data device.
+.TP
+.B \-R
+Report media errors to fsnotify.
+.TP
+.B \-s
+Sleep this many microseconds between IO requests.
+.PD
+.RE
 
 .TP
 .BI "rginfo [ \-r " rgno " ]"
@@ -1699,6 +1766,72 @@ Set the given filesystem properties to the specified values.
 .TP
 .BI "removefsprops " name " [ " names "... ]"
 Remove the given filesystem properties.
+.TP
+.BI "listmount [ \-f " mask " ] [ \-i " mnt_id " ] [ \-n " path " ] [ \-r ] [ \-t" fstype " ]"
+Print information about the mounted filesystems in a particular mount
+namespace.
+The information returned by this call corresponds to the information returned
+by the
+.BR statmount (2)
+system call.
+
+.RE
+.RS 1.0i
+.PD 0
+.TP
+.BI "\-f " mask
+Pass this numeric argument as the mask argument to
+.BR statmount (8).
+Defaults to all bits set, to retrieve all possible information.
+
+.TP
+.BI "\-i " mnt_id
+Only return information for mounts below this mount in the mount tree.
+Defaults to the root directory.
+
+.TP
+.BI "\-n " path
+Return information for the mount namespace given by this procfs path.
+For a given process, the path will most likely look like
+.BI /proc/ $pid /ns/mnt
+though any path can be provided.
+Defaults to the mount namespace of the
+.B xfs_io
+process itself.
+
+.TP
+.B \-r
+Print raw bitmasks instead of converting them to strings.
+
+.TP
+.BI "\-t " fstype
+Only return information for filesystems of this type.
+If not specified, no filtering is performed.
+.RE
+
+.TP
+.BI "statmount [ \-f " mask " ] [ \-r ]"
+Print information about the mounted filesystem for each open file.
+The information returned by this call corresponds to the information returned
+by the
+.BR statmount (2)
+system call.
+
+.RE
+.RS 1.0i
+.PD 0
+.TP
+.BI "\-f " mask
+Pass this numeric argument as the mask argument to
+.BR statmount (8).
+Defaults to all bits set, to retrieve all possible information.
+
+.TP
+.B \-r
+Print raw bitmasks instead of converting them to strings.
+
+.RE
+.PD
 
 .SH OTHER COMMANDS
 .TP

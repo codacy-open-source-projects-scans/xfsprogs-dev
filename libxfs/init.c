@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include "init.h"
 
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -22,10 +22,9 @@
 #include "xfs_rmap_btree.h"
 #include "xfs_refcount_btree.h"
 #include "xfs_metafile.h"
+#include "xfs_buf_mem.h"
 #include "libfrog/platform.h"
 #include "libfrog/util.h"
-#include "libxfs/xfile.h"
-#include "libxfs/buf_mem.h"
 
 #include "xfs_format.h"
 #include "xfs_da_format.h"

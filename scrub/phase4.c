@@ -181,7 +181,7 @@ repair_everything(
 {
 	struct workqueue		wq;
 	int				fixed_anything;
-	int				ret;
+	int				ret, ret2;
 
 	ret = -workqueue_create(&wq, (struct xfs_mount *)ctx,
 			scrub_nproc_workqueue(ctx));
@@ -211,9 +211,12 @@ repair_everything(
 			fixed_anything++;
 	} while (fixed_anything > 0);
 
-	ret = -workqueue_terminate(&wq);
-	if (ret)
-		str_liberror(ctx, ret, _("finishing repair work"));
+	ret2 = -workqueue_terminate(&wq);
+	if (ret2) {
+		str_liberror(ctx, ret2, _("finishing repair work"));
+		if (ret >= 0)
+			ret = ret2;
+	}
 	workqueue_destroy(&wq);
 
 	if (ret < 0)
@@ -251,7 +254,8 @@ phase4_func(
 	 * phase 7, but some of the cross-referencing requires fairly accurate
 	 * summary counters.  Check and try to repair them now to minimize the
 	 * chance that repairs of primary metadata fail due to secondary
-	 * metadata.  If repairs fails, we'll come back during phase 7.
+	 * metadata or ENOSPC on broken counters.  If repairs fails, we'll come
+	 * back during phase 7.
 	 */
 	scrub_item_init_fs(&sri);
 	scrub_item_schedule(&sri, XFS_SCRUB_TYPE_FSCOUNTERS);
@@ -266,6 +270,10 @@ phase4_func(
 	if (ret)
 		return ret;
 
+	/*
+	 * Try to fix the quota usage counts so that online repair doesn't
+	 * fail with EDQUOT (or worse shut down the fs) due to bad counts.
+	 */
 	if (fsgeom.sick & XFS_FSOP_GEOM_SICK_QUOTACHECK)
 		scrub_item_schedule(&sri, XFS_SCRUB_TYPE_QUOTACHECK);
 
@@ -290,9 +298,17 @@ phase4_estimate(
 {
 	unsigned long long	need_fixing;
 
-	/* Everything on the repair lis. */
+	/* Everything on the repair lists. */
 	need_fixing = action_list_length(ctx->fs_repair_list) +
 		      action_list_length(ctx->file_repair_list);
+
+	/*
+	 * fscounters and quotacheck are run directly by phase4_func
+	 * independent of the repair lists, so put that in the item count.
+	 * See phase4_func for why.
+	 */
+	if (need_fixing)
+		need_fixing += 2;
 
 	*items = need_fixing;
 	*nr_threads = scrub_nproc(ctx) + 1;

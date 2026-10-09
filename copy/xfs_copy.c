@@ -673,6 +673,7 @@ main(int argc, char **argv)
 	if (S_ISREG(statbuf.st_mode))
 		source_is_file = 1;
 
+	wbuf_align = getpagesize();
 	if (source_is_file && platform_test_xfs_fd(source_fd))  {
 		if (fcntl(source_fd, F_SETFL, open_flags | O_DIRECT) < 0)  {
 			do_log(_("%s: Cannot set direct I/O flag on \"%s\".\n"),
@@ -685,13 +686,12 @@ main(int argc, char **argv)
 			die_perror();
 		}
 
-		wbuf_align = d.d_mem;
+		wbuf_align = max(wbuf_align, d.d_mem);
 		wbuf_size = min(d.d_maxiosz, 1 * 1024 * 1024);
 		wbuf_miniosize = d.d_miniosz;
 	} else  {
 		/* set arbitrary I/O params, miniosize at least 1 disk block */
 
-		wbuf_align = getpagesize();
 		wbuf_size = 1 * 1024 * 1024;
 		wbuf_miniosize = -1;	/* set after mounting source fs */
 	}
@@ -891,8 +891,8 @@ main(int argc, char **argv)
 			off -= XFS_MAX_SECTORSIZE;
 			len = pwrite(target[i].fd, lb, XFS_MAX_SECTORSIZE, off);
 			if (len < 0) {
-				do_log(_("%s:  failed to write last block\n"),
-					progname);
+				do_log(_("%s:  failed to write last block: %s\n"),
+					progname, strerror(errno));
 				do_log(_("\tIs target \"%s\" too small?\n"),
 					target[i].name);
 				die_perror();

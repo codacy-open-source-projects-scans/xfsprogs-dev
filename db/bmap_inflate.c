@@ -176,7 +176,7 @@ alloc_bmbt_blocks(
 			target = XFS_AGB_TO_FSB(mp, tgt_agno, 0);
 		}
 
-		libxfs_rmap_ino_bmbt_owner(&args.oinfo, ip->i_ino,
+		libxfs_rmap_ino_bmbt_owner(&args.oinfo, I_INO(ip),
 				XFS_DATA_FORK);
 
 		error = -libxfs_alloc_vextent_start_ag(&args, target);
@@ -421,7 +421,7 @@ estimate_size(
 
 report:
 	dbprintf(_("ino 0x%llx nextents %llu btblocks %llu btheight %u dirty %u\n"),
-			ip->i_ino, nextents, bmap_bload.nr_blocks,
+			I_INO(ip), nextents, bmap_bload.nr_blocks,
 			bmap_bload.btree_height, dirty_blocks);
 
 	return 0;
@@ -437,7 +437,7 @@ bmapinflate_f(
 	struct xfs_trans	*tp;
 	char			*p;
 	unsigned long long	nextents = 0;
-	unsigned long long	dirty_bytes = 60U << 20; /* 60MiB */
+	unsigned long long	dirty_bytes = MEGABYTES(60);
 	unsigned long long	dirty_blocks;
 	unsigned int		resblks;
 	bool			estimate = false;

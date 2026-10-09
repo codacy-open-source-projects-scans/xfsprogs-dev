@@ -10,7 +10,7 @@
 #include <unistd.h>
 #include <pthread.h>
 
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -85,7 +85,7 @@ cache_expand(
 {
 	pthread_mutex_lock(&cache->c_mutex);
 #ifdef CACHE_DEBUG
-	fprintf(stderr, "doubling cache size to %d\n", 2 * cache->c_maxcount);
+	fprintf(stderr, "doubling cache size to %u\n", 2 * cache->c_maxcount);
 #endif
 	cache->c_maxcount *= 2;
 	pthread_mutex_unlock(&cache->c_mutex);

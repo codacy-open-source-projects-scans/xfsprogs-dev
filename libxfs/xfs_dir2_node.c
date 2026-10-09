@@ -4,7 +4,7 @@
  * Copyright (c) 2013 Red Hat, Inc.
  * All Rights Reserved.
  */
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -15,6 +15,7 @@
 #include "xfs_bmap.h"
 #include "xfs_dir2.h"
 #include "xfs_dir2_priv.h"
+#include "xfs_error.h"
 #include "xfs_trace.h"
 #include "xfs_trans.h"
 #include "xfs_health.h"
@@ -1736,7 +1737,7 @@ xfs_dir2_node_add_datablk(
 				   fbno)) {
 			xfs_alert(mp,
 "%s: dir ino %llu needed freesp block %lld for data block %lld, got %lld",
-				__func__, (unsigned long long)dp->i_ino,
+				__func__, (unsigned long long)I_INO(dp),
 				(long long)xfs_dir2_db_to_fdb(args->geo, *dbno),
 				(long long)*dbno, (long long)fbno);
 			if (fblk) {

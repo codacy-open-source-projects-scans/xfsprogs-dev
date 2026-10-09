@@ -26,6 +26,7 @@
 #include "libfrog/radix-tree.h"
 #include "libfrog/bitmask.h"
 #include "libfrog/div64.h"
+#include "libfrog/util.h"
 #include "atomic.h"
 #include "spinlock.h"
 
@@ -91,8 +92,7 @@ struct iomap;
 #include "xfs_btree_staging.h"
 #include "xfs_rtbitmap.h"
 #include "xfs_symlink_remote.h"
-#include "libxfs/xfile.h"
-#include "libxfs/buf_mem.h"
+#include "xfs_buf_mem.h"
 #include "xfs_btree_mem.h"
 #include "xfs_parent.h"
 #include "xfs_ag_resv.h"
@@ -186,12 +186,6 @@ int	libxfs_alloc_file_space(struct xfs_inode *ip, xfs_off_t offset,
 		xfs_off_t len, uint32_t bmapi_flags);
 int	libxfs_file_write(struct xfs_inode *ip, void *buf, off_t pos,
 		size_t len);
-
-/* XXX: this is messy and needs fixing */
-#ifndef __LIBXFS_INTERNAL_XFS_H__
-extern void cmn_err(int, char *, ...);
-enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
-#endif
 
 #include "xfs_ialloc.h"
 

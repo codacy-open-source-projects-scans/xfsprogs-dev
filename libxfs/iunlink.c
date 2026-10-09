@@ -4,7 +4,7 @@
  * All Rights Reserved.
  */
 
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "libxfs.h"
 #include "libxfs_io.h"
 #include "init.h"
@@ -44,7 +44,7 @@ xfs_iunlink_log_dinode(
 	int			offset;
 	int			error;
 
-	error = xfs_imap_to_bp(mp, tp, &ip->i_imap, &ibp);
+	error = xfs_read_icluster(iup->pag, tp, ip->i_imap.im_agbno, &ibp);
 	if (error)
 		return error;
 	/*
@@ -66,7 +66,7 @@ xfs_iunlink_log_dinode(
 	}
 
 	trace_xfs_iunlink_update_dinode(mp, pag_agno(iup->pag),
-					XFS_INO_TO_AGINO(mp, ip->i_ino),
+					XFS_INODE_TO_AGINO(ip),
 					be32_to_cpu(dip->di_next_unlinked),
 					iup->next_agino);
 

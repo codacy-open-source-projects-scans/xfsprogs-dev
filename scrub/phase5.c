@@ -527,7 +527,7 @@ retry_deferred_inodes(
 		ncs->new_deferred = NULL;
 		ncs->fixed_something = false;
 
-		error = -bitmap_iterate(ncs->cur_deferred,
+		error = bitmap_iterate(ncs->cur_deferred,
 				retry_deferred_inode_range, ncs);
 		if (error)
 			return error;
@@ -546,7 +546,7 @@ retry_deferred_inodes(
 	ncs->new_deferred = NULL;
 	ncs->last_call = true;
 
-	error = -bitmap_iterate(ncs->cur_deferred,
+	error = bitmap_iterate(ncs->cur_deferred,
 			retry_deferred_inode_range, ncs);
 	if (error)
 		return error;
@@ -687,8 +687,10 @@ queue_fs_scan(
 	item->abortedp = abortedp;
 
 	ret = -workqueue_add(wq, fs_scan_worker, nr, item);
-	if (ret)
+	if (ret) {
 		str_liberror(ctx, ret, _("queuing fs scan work"));
+		free(item);
+	}
 
 	return ret;
 }
@@ -764,8 +766,10 @@ queue_metapath_scan(
 	item->abortedp = abortedp;
 
 	ret = -workqueue_add(wq, fs_scan_worker, 0, item);
-	if (ret)
+	if (ret) {
 		str_liberror(ctx, ret, _("queuing metapath scan work"));
+		free(item);
+	}
 
 	return ret;
 }
@@ -897,10 +901,8 @@ _("Filesystem has errors, skipping connectivity checks."));
 	scrub_report_preen_triggers(ctx);
 out_lock:
 	pthread_mutex_destroy(&ncs.lock);
-	if (ncs.new_deferred)
-		bitmap_free(&ncs.new_deferred);
-	if (ncs.cur_deferred)
-		bitmap_free(&ncs.cur_deferred);
+	bitmap_free(&ncs.new_deferred);
+	bitmap_free(&ncs.cur_deferred);
 	return ret;
 }
 

@@ -60,6 +60,9 @@ cscope.*
 /estimate/xfs_estimate
 /fsr/xfs_fsr
 /growfs/xfs_growfs
+/healer/xfs_healer
+/healer/xfs_healer_start
+/healer/*.service
 /io/xfs_io
 /logprint/xfs_logprint
 /mdrestore/xfs_mdrestore

@@ -45,11 +45,13 @@ typedef struct fileio {
 	struct fs_path	fs_path;	/* XFS path information */
 } fileio_t;
 
-extern fileio_t		*filetable;	/* open file table */
-extern int		filecount;	/* number of open files */
-extern fileio_t		*file;		/* active file in file table */
-extern int filelist_f(void);
-extern int stat_f(int argc, char **argv);
+extern fileio_t *filetable;	/* open file table */
+extern int filecount;		/* number of open files */
+extern fileio_t *file;		/* active file in file table */
+
+int filelist_f(void);
+int stat_f(int argc, char **argv);
+
 /*
  * Memory mapped file regions
  */
@@ -62,103 +64,109 @@ typedef struct mmap_region {
 	char		*name;		/* name of backing file */
 } mmap_region_t;
 
-extern mmap_region_t	*maptable;	/* mmap'd region array */
-extern int		mapcount;	/* #entries in the mapping table */
-extern mmap_region_t	*mapping;	/* active mapping table entry */
-extern int maplist_f(void);
-extern void *check_mapping_range(mmap_region_t *, off_t, size_t, int);
+extern mmap_region_t *maptable;	/* mmap'd region array */
+extern int mapcount;		/* #entries in the mapping table */
+extern mmap_region_t *mapping;	/* active mapping table entry */
+
+int maplist_f(void);
+void *check_mapping_range(mmap_region_t *, off_t, size_t, int);
 
 /*
  * Various xfs_io helper routines/globals
  */
 
-extern off_t		filesize(void);
-extern int		openfile(char *, struct xfs_fsop_geom *, int, mode_t,
-				 struct fs_path *);
-extern int		addfile(char *, int , struct xfs_fsop_geom *, int,
-				struct fs_path *);
-extern int		closefile(void);
-extern void		print_xflags(uint, int, int, const char *, int, int);
+off_t  filesize(void);
+int openfile(char *, struct xfs_fsop_geom *, int, mode_t, struct fs_path *);
+int addfile(char *, int , struct xfs_fsop_geom *, int, struct fs_path *);
+int closefile(void);
+void print_xflags(uint, int, int, const char *, int, int);
 
-extern unsigned int	recurse_all;
-extern unsigned int	recurse_dir;
+extern unsigned int recurse_all;
+extern unsigned int recurse_dir;
 
-extern void		*io_buffer;
-extern size_t		io_buffersize;
-extern int		vectors;
-extern struct iovec	*iov;
-extern int		alloc_buffer(size_t, int, unsigned int);
-extern int		read_buffer(int, off_t, long long, long long *,
-					int, int);
-extern void		dump_buffer(off_t, ssize_t);
+extern void *io_buffer;
+extern size_t io_buffersize;
+extern int vectors;
+extern struct iovec *iov;
 
-extern void		attr_init(void);
-extern void		bmap_init(void);
-extern void		encrypt_init(void);
-extern void		file_init(void);
-extern void		flink_init(void);
-extern void		freeze_init(void);
-extern void		fsuuid_init(void);
-extern void		fsync_init(void);
-extern void		getrusage_init(void);
-extern void		help_init(void);
-extern void		imap_init(void);
-extern void		inject_init(void);
-extern void		label_init(void);
-extern void		mmap_init(void);
-extern void		open_init(void);
-extern void		parent_init(void);
-extern void		pread_init(void);
-extern void		prealloc_init(void);
-extern void		pwrite_init(void);
-extern void		quit_init(void);
-extern void		resblks_init(void);
-extern void		seek_init(void);
-extern void		shutdown_init(void);
-extern void		stat_init(void);
-extern void		swapext_init(void);
-extern void		sync_init(void);
-extern void		truncate_init(void);
-extern void		utimes_init(void);
-extern void		fadvise_init(void);
-extern void		sendfile_init(void);
-extern void		madvise_init(void);
-extern void		mincore_init(void);
-extern void		fiemap_init(void);
+int alloc_buffer(size_t, int, unsigned int);
+int read_buffer(int, off_t, long long, long long *, int, int);
+void dump_buffer(off_t, ssize_t);
+void attr_init(void);
+void bmap_init(void);
+void encrypt_init(void);
+void file_init(void);
+void flink_init(void);
+void freeze_init(void);
+void fsuuid_init(void);
+void fsync_init(void);
+void getrusage_init(void);
+void help_init(void);
+void imap_init(void);
+void inject_init(void);
+void label_init(void);
+void mmap_init(void);
+void open_init(void);
+void parent_init(void);
+void pread_init(void);
+void prealloc_init(void);
+void pwrite_init(void);
+void quit_init(void);
+void resblks_init(void);
+void seek_init(void);
+void shutdown_init(void);
+void stat_init(void);
+void swapext_init(void);
+void sync_init(void);
+void truncate_init(void);
+void utimes_init(void);
+void fadvise_init(void);
+void sendfile_init(void);
+void madvise_init(void);
+void mincore_init(void);
+void fiemap_init(void);
 
 #ifdef HAVE_COPY_FILE_RANGE
-extern void		copy_range_init(void);
+void copy_range_init(void);
 #else
 #define copy_range_init()	do { } while (0)
 #endif
 
 #ifdef HAVE_CACHESTAT
-extern void cachestat_init(void);
+void cachestat_init(void);
 #else
 #define cachestat_init() do { } while (0)
 #endif
 
-extern void		sync_range_init(void);
-extern void		readdir_init(void);
-extern void		reflink_init(void);
-extern void		cowextsize_init(void);
+void sync_range_init(void);
+void readdir_init(void);
+void reflink_init(void);
+void cowextsize_init(void);
 
 #ifdef HAVE_GETFSMAP
-extern void		fsmap_init(void);
+void fsmap_init(void);
 #else
 # define fsmap_init()	do { } while (0)
 #endif
 
 #ifdef HAVE_DEVMAPPER
-extern void		log_writes_init(void);
+void log_writes_init(void);
 #else
 #define log_writes_init()      do { } while (0)
 #endif
 
-extern void		scrub_init(void);
-extern void		repair_init(void);
-extern void		crc32cselftest_init(void);
-extern void		bulkstat_init(void);
-void			exchangerange_init(void);
-void			fsprops_init(void);
-void			aginfo_init(void);
+void scrub_init(void);
+void repair_init(void);
+void crc32cselftest_init(void);
+void bulkstat_init(void);
+void exchangerange_init(void);
+void fsprops_init(void);
+void aginfo_init(void);
+void healthmon_init(void);
+void verifymedia_init(void);
+
+#ifdef HAVE_LISTMOUNT
+void listmount_init(void);
+#else
+# define listmount_init()	do { } while (0)
+#endif

@@ -34,8 +34,8 @@
  * define a guard and something we can check to determine what include context
  * we are running from.
  */
-#ifndef __LIBXFS_INTERNAL_XFS_H__
-#define __LIBXFS_INTERNAL_XFS_H__
+#ifndef _XFS_PLATFORM_H
+#define _XFS_PLATFORM_H
 
 /* CONFIG_XFS_* must be defined to 1 to work with IS_ENABLED() */
 #define CONFIG_XFS_RT 1
@@ -65,9 +65,6 @@
 #include "libfrog/crc32c.h"
 
 #include <sys/xattr.h>
-#ifdef HAVE_GETRANDOM_NONBLOCK
-#include <sys/random.h>
-#endif
 
 /* Zones used in libxfs allocations that aren't in shared header files */
 extern struct kmem_cache *xfs_buf_item_cache;
@@ -133,9 +130,6 @@ extern char    *progname;
 #define XFS_IGET_CREATE			0x1
 #define XFS_IGET_UNTRUSTED		0x2
 
-extern void cmn_err(int, char *, ...);
-enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
-
 #define xfs_info(mp,fmt,args...)	cmn_err(CE_CONT, _(fmt), ## args)
 #define xfs_info_ratelimited(mp,fmt,args...) cmn_err(CE_CONT, _(fmt), ## args)
 #define xfs_notice(mp,fmt,args...)	cmn_err(CE_NOTE, _(fmt), ## args)
@@ -153,39 +147,12 @@ enum ce { CE_DEBUG, CE_CONT, CE_NOTE, CE_WARN, CE_ALERT, CE_PANIC };
 #define xfs_mod_delalloc(a,b,c)		((void) 0)
 #define xfs_mod_sb_delalloc(sb, d)	((void) 0)
 
-/* stop unused var warnings by assigning mp to itself */
-
-#define xfs_corruption_error(e,l,mp,b,sz,fi,ln,fa)	do { \
-	(mp) = (mp); \
-	cmn_err(CE_ALERT, "%s: XFS_CORRUPTION_ERROR", (e));  \
-} while (0)
-
-#define XFS_CORRUPTION_ERROR(e, lvl, mp, buf, bufsize)	do { \
-	(mp) = (mp); \
-	cmn_err(CE_ALERT, "%s: XFS_CORRUPTION_ERROR", (e));  \
-} while (0)
-
-#define XFS_ERROR_REPORT(e,l,mp)	do { \
-	(mp) = (mp); \
-	cmn_err(CE_ALERT, "%s: XFS_ERROR_REPORT", (e));  \
-} while (0)
-
-#define XFS_WARN_CORRUPT(mp, expr) \
-	( xfs_is_reporting_corruption(mp) ? \
-	   (printf("%s: XFS_WARN_CORRUPT at %s:%d", #expr, \
-		   __func__, __LINE__), true) : true)
-
-#define XFS_IS_CORRUPT(mp, expr)	\
-	(unlikely(expr) ? XFS_WARN_CORRUPT((mp), (expr)) : false)
-
-#define XFS_ERRLEVEL_LOW		1
 #define XFS_ILOCK_EXCL			0
 #define XFS_ILOCK_SHARED		0
 #define XFS_IOLOCK_EXCL			0
 #define XFS_STATS_INC(mp, count)	do { (mp) = (mp); } while (0)
-#define XFS_STATS_DEC(mp, count, x)	do { (mp) = (mp); } while (0)
+#define XFS_STATS_DEC(mp, count)	do { (mp) = (mp); } while (0)
 #define XFS_STATS_ADD(mp, count, x)	do { (mp) = (mp); } while (0)
-#define XFS_TEST_ERROR(a,b)		(false)
 
 #define __section(section)	__attribute__((__section__(section)))
 
@@ -213,12 +180,6 @@ static inline bool WARN_ON(bool expr) {
 
 #define percpu_counter_read_positive(x)	((*x) > 0 ? (*x) : 0)
 #define percpu_counter_sum_positive(x)	((*x) > 0 ? (*x) : 0)
-
-#ifdef HAVE_GETRANDOM_NONBLOCK
-uint32_t get_random_u32(void);
-#else
-#define get_random_u32()	(0)
-#endif
 
 #define PAGE_SIZE		getpagesize()
 extern unsigned int PAGE_SHIFT;
@@ -423,21 +384,6 @@ xfs_buf_readahead(
 #define xfs_sort_inodes(i_tab, nr)			((void) 0)
 
 /* space allocation */
-#define XFS_EXTENT_BUSY_DISCARDED	0x01	/* undergoing a discard op. */
-#define XFS_EXTENT_BUSY_SKIP_DISCARD	0x02	/* do not discard */
-
-#define xfs_extent_busy_reuse(...)			((void) 0)
-/* avoid unused variable warning */
-#define xfs_extent_busy_insert(tp,xg,bno,len,flags)({ 	\
-	struct xfs_group *__foo = xg;			\
-	__foo = __foo; /* no set-but-unused warning */	\
-})
-#define xfs_extent_busy_trim(group,minlen,maxlen,bno,len,busy_gen) 	({	\
-	unsigned __foo = *(busy_gen);				\
-	*(busy_gen) = __foo;					\
-	false;							\
-})
-#define xfs_extent_busy_flush(tp,pag,busy_gen,alloc_flags)	((int)(0))
 
 #define xfs_rotorstep				1
 #define xfs_bmap_rtalloc(a)			(-ENOSYS)
@@ -447,21 +393,6 @@ xfs_buf_readahead(
 #define xfs_filestream_select_ag(...)		(-ENOSYS)
 
 #define xfs_trans_inode_buf(tp, bp)		((void) 0)
-
-/* quota bits */
-#define xfs_trans_mod_dquot_byino(t,i,f,d)		({ \
-	uint _f = (f); \
-	_f = _f; /* shut up gcc */ \
-})
-#define xfs_trans_reserve_quota_nblks(t,i,b,n,f)	(0)
-
-/* hack too silence gcc */
-static inline int retzero(void) { return 0; }
-#define xfs_trans_unreserve_quota_nblks(t,i,b,n,f)	retzero()
-#define xfs_quota_unreserve_blkres(i,b) 		retzero()
-
-#define xfs_quota_reserve_blkres(i,b)		(0)
-#define xfs_qm_dqattach(i)			(0)
 
 #define uuid_copy(s,d)		platform_uuid_copy((s),(d))
 #define uuid_equal(s,d)		(platform_uuid_compare((s),(d)) == 0)
@@ -567,11 +498,6 @@ void xfs_log_item_init(struct xfs_mount *mp, struct xfs_log_item *lip, int type,
 #define XFS_STATS_INC_OFF(mp, off)
 #define XFS_STATS_ADD_OFF(mp, off, val)
 
-typedef unsigned char u8;
-unsigned int hweight8(unsigned int w);
-unsigned int hweight32(unsigned int w);
-unsigned int hweight64(__u64 w);
-
 #define xfs_buf_cache_init(bch)		(0)
 #define xfs_buf_cache_destroy(bch)	((void)0)
 
@@ -621,4 +547,4 @@ int xfs_bmap_last_extent(struct xfs_trans *tp, struct xfs_inode *ip,
 #define irix_sgid_inherit		(false)
 #define vfsgid_in_group_p(...)		(false)
 
-#endif	/* __LIBXFS_INTERNAL_XFS_H__ */
+#endif	/* _XFS_PLATFORM_H */

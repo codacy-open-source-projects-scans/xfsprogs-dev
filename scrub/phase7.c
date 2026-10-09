@@ -26,7 +26,9 @@
 struct summary_counts {
 	unsigned long long	dbytes;		/* data dev bytes */
 	unsigned long long	rbytes;		/* rt dev bytes */
-	unsigned long long	next_phys;	/* next phys bytes we see? */
+	unsigned long long	lbytes;		/* log dev bytes */
+	unsigned long long	next_dphys;	/* next phys bytes we see on data dev? */
+	unsigned long long	next_rphys;	/* next phys bytes we see on rt dev? */
 	unsigned long long	agbytes;	/* freespace bytes */
 
 	/* Free space histogram, in fsb */
@@ -68,21 +70,9 @@ count_block_summary(
 	void			*arg)
 {
 	struct summary_counts	*counts;
-	bool			is_rt = false;
+	enum xfs_device		dev = from_fsmap_dev(ctx, fsmap->fmr_device);
 	unsigned long long	len;
 	int			ret;
-
-	if (ctx->mnt.fsgeom.rtstart) {
-		if (fsmap->fmr_device == XFS_DEV_LOG)
-			return 0;
-		if (fsmap->fmr_device == XFS_DEV_RT)
-			is_rt = true;
-	} else {
-		if (fsmap->fmr_device == ctx->fsinfo.fs_logdev)
-			return 0;
-		if (fsmap->fmr_device == ctx->fsinfo.fs_rtdev)
-			is_rt = true;
-	}
 
 	counts = ptvar_get((struct ptvar *)arg, &ret);
 	if (ret) {
@@ -95,10 +85,16 @@ count_block_summary(
 		uint64_t	blocks;
 
 		blocks = cvt_b_to_off_fsbt(&ctx->mnt, fsmap->fmr_length);
-		if (is_rt)
+		switch (dev) {
+		case XFS_DEV_RT:
 			hist_add(&counts->rtdev_hist, blocks);
-		else
+			break;
+		case XFS_DEV_DATA:
 			hist_add(&counts->datadev_hist, blocks);
+			break;
+		case XFS_DEV_LOG:
+			break;
+		}
 		return 0;
 	}
 
@@ -109,17 +105,29 @@ count_block_summary(
 	    fsmap->fmr_owner == XFS_FMR_OWN_AG)
 		counts->agbytes += fsmap->fmr_length;
 
-	if (is_rt) {
+	switch (dev) {
+	case XFS_DEV_LOG:
+		/* Count external log */
+		counts->lbytes += len;
+		break;
+	case XFS_DEV_RT:
 		/* Count realtime extents. */
-		counts->rbytes += len;
-	} else {
-		/* Count datadev extents. */
-		if (counts->next_phys >= fsmap->fmr_physical + len)
+		if (counts->next_rphys >= fsmap->fmr_physical + len)
 			return 0;
-		else if (counts->next_phys > fsmap->fmr_physical)
-			len = counts->next_phys - fsmap->fmr_physical;
+		else if (counts->next_rphys > fsmap->fmr_physical)
+			len -= counts->next_rphys - fsmap->fmr_physical;
+		counts->rbytes += len;
+		counts->next_rphys = fsmap->fmr_physical + fsmap->fmr_length;
+		break;
+	case XFS_DEV_DATA:
+		/* Count datadev extents. */
+		if (counts->next_dphys >= fsmap->fmr_physical + len)
+			return 0;
+		else if (counts->next_dphys > fsmap->fmr_physical)
+			len -= counts->next_dphys - fsmap->fmr_physical;
 		counts->dbytes += len;
-		counts->next_phys = fsmap->fmr_physical + fsmap->fmr_length;
+		counts->next_dphys = fsmap->fmr_physical + fsmap->fmr_length;
+		break;
 	}
 
 	return 0;
@@ -137,6 +145,7 @@ add_summaries(
 
 	total->dbytes += item->dbytes;
 	total->rbytes += item->rbytes;
+	total->lbytes += item->lbytes;
 	total->agbytes += item->agbytes;
 
 	hist_import(&total->datadev_hist, &item->datadev_hist);
@@ -162,14 +171,17 @@ phase7_func(
 	unsigned long long	used_data;
 	unsigned long long	used_rt;
 	unsigned long long	used_files;
+	unsigned long long	used_log;
 	unsigned long long	stat_data;
 	unsigned long long	stat_rt;
+	unsigned long long	stat_log;
 	uint64_t		counted_inodes = 0;
 	unsigned long long	absdiff;
 	unsigned long long	d_blocks;
 	unsigned long long	d_bfree;
 	unsigned long long	r_blocks;
 	unsigned long long	r_bfree;
+	unsigned long long	l_blocks;
 	bool			complain;
 	int			ip;
 	int			error;
@@ -223,7 +235,7 @@ phase7_func(
 	}
 
 	error = scrub_scan_estimate_blocks(ctx, &d_blocks, &d_bfree, &r_blocks,
-			&r_bfree, &used_files);
+			&r_bfree, &used_files, &l_blocks);
 	if (error) {
 		str_liberror(ctx, error, _("estimating verify work"));
 		return error;
@@ -240,8 +252,13 @@ phase7_func(
 	/* Report on what we found. */
 	used_data = cvt_off_fsb_to_b(&ctx->mnt, d_blocks - d_bfree);
 	used_rt = cvt_off_fsb_to_b(&ctx->mnt, r_blocks - r_bfree);
+	if (ctx->mnt.fsgeom.logstart == 0)
+		used_log = cvt_off_fsb_to_b(&ctx->mnt, l_blocks);
+	else
+		used_log = 0;
 	stat_data = totalcount.dbytes;
 	stat_rt = totalcount.rbytes;
+	stat_log = totalcount.lbytes;
 
 	/*
 	 * Complain if the counts are off by more than 10% unless
@@ -251,28 +268,32 @@ phase7_func(
 	complain = verbose;
 	complain |= !within_range(ctx, stat_data, used_data, absdiff, 1, 10,
 			_("data blocks"));
+	complain |= !within_range(ctx, stat_log, used_log, absdiff, 1, 10,
+			_("external log blocks"));
 	complain |= !within_range(ctx, stat_rt, used_rt, absdiff, 1, 10,
 			_("realtime blocks"));
 	complain |= !within_range(ctx, counted_inodes, used_files, 100, 1, 10,
 			_("inodes"));
 
 	if (complain) {
-		double		d, r, i;
-		char		*du, *ru, *iu;
+		double		d, r, i, l;
+		char		*du, *ru, *iu, *lu;
 
-		if (used_rt || stat_rt) {
+		if (used_rt || stat_rt || used_log) {
 			d = auto_space_units(used_data, &du);
 			r = auto_space_units(used_rt, &ru);
+			l = auto_space_units(used_log, &lu);
 			i = auto_units(used_files, &iu, &ip);
 			fprintf(stdout,
-_("%.1f%s data used;  %.1f%s realtime data used;  %.*f%s inodes used.\n"),
-					d, du, r, ru, ip, i, iu);
+_("%.1f%s data used;  %.1f%s realtime data used;  %.1f%s external log used;  %.*f%s inodes used.\n"),
+					d, du, r, ru, l, lu, ip, i, iu);
 			d = auto_space_units(stat_data, &du);
 			r = auto_space_units(stat_rt, &ru);
+			l = auto_space_units(stat_log, &lu);
 			i = auto_units(counted_inodes, &iu, &ip);
 			fprintf(stdout,
-_("%.1f%s data found; %.1f%s realtime data found; %.*f%s inodes found.\n"),
-					d, du, r, ru, ip, i, iu);
+_("%.1f%s data found; %.1f%s realtime data found; %.1f%s external log found; %.*f%s inodes found.\n"),
+					d, du, r, ru, l, lu, ip, i, iu);
 		} else {
 			d = auto_space_units(used_data, &du);
 			i = auto_units(used_files, &iu, &ip);
@@ -313,13 +334,13 @@ _("%.*f%s inodes counted; %.*f%s inodes checked.\n"),
 	 */
 	if (ctx->bytes_checked &&
 	    (verbose ||
-	     !within_range(ctx, used_data + used_rt,
+	     !within_range(ctx, used_data + used_rt + used_log,
 			ctx->bytes_checked, absdiff, 1, 10,
 			_("verified blocks")))) {
 		double		b1, b2;
 		char		*b1u, *b2u;
 
-		b1 = auto_space_units(used_data + used_rt, &b1u);
+		b1 = auto_space_units(used_data + used_rt + used_log, &b1u);
 		b2 = auto_space_units(ctx->bytes_checked, &b2u);
 		fprintf(stdout,
 _("%.1f%s data counted; %.1f%s data verified.\n"),

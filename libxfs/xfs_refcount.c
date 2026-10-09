@@ -3,7 +3,7 @@
  * Copyright (C) 2016 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <darrick.wong@oracle.com>
  */
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -16,6 +16,7 @@
 #include "xfs_refcount_btree.h"
 #include "xfs_alloc.h"
 #include "xfs_errortag.h"
+#include "xfs_error.h"
 #include "xfs_trace.h"
 #include "xfs_trans.h"
 #include "xfs_bit.h"
@@ -1412,8 +1413,7 @@ xfs_refcount_finish_one(
 	if (rcur == NULL) {
 		struct xfs_perag	*pag = to_perag(ri->ri_group);
 
-		error = xfs_alloc_read_agf(pag, tp,
-				XFS_ALLOC_FLAG_FREEING, &agbp);
+		error = xfs_alloc_read_agf(pag, tp, 0, &agbp);
 		if (error)
 			return error;
 
@@ -2031,8 +2031,8 @@ xfs_refcount_recover_extent(
 		return -EFSCORRUPTED;
 	}
 
-	rr = kmalloc(sizeof(struct xfs_refcount_recovery),
-			GFP_KERNEL | __GFP_NOFAIL);
+	rr = kmalloc_obj(struct xfs_refcount_recovery,
+			 GFP_KERNEL | __GFP_NOFAIL);
 	INIT_LIST_HEAD(&rr->rr_list);
 	xfs_refcount_btrec_to_irec(rec, &rr->rr_rrec);
 

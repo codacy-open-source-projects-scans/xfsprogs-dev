@@ -4,7 +4,8 @@
  * All Rights Reserved.
  */
 
-#include "quota.h"
+#include "libfrog/paths.h"
+#include "libfrog/quotactl.h"
 #include <sys/quota.h>
 
 #ifndef PRJQUOTA
@@ -28,9 +29,9 @@ xtype_to_qtype(
 
 static int
 xcommand_to_qcommand(
-	uint		command)
+	enum xfs_quota_cmd	xcommand)
 {
-	switch (command) {
+	switch (xcommand) {
 	case XFS_QUOTAON:
 		return Q_XQUOTAON;
 	case XFS_QUOTAOFF:
@@ -55,16 +56,36 @@ xcommand_to_qcommand(
 
 int
 xfsquotactl(
-	int		command,
-	const char	*device,
-	uint		type,
-	uint		id,
-	void		*addr)
+	int			mnt_fd,
+	const char		*device,
+	enum xfs_quota_cmd	xcommand,
+	uint			xtype,
+	uint			id,
+	void			*addr)
 {
-	int		qcommand, qtype;
+	const int		op = QCMD(xcommand_to_qcommand(xcommand),
+					  xtype_to_qtype(xtype));
+	int			ret = -1;
 
-	qtype = xtype_to_qtype(type);
-	qcommand = xcommand_to_qcommand(command);
+	errno = ENOSYS;
+#ifdef HAVE_QUOTACTL_FD
+	if (mnt_fd >= 0)
+		ret = syscall(SYS_quotactl_fd, mnt_fd, op, id, addr);
+#endif
+	if (ret != -1 || errno != ENOSYS)
+		return ret;
 
-	return quotactl(QCMD(qcommand, qtype), device, id, addr);
+	return quotactl(op, device, id, addr);
+}
+
+int
+xfrog_quotactl(
+	const struct fs_path	*mount,
+	enum xfs_quota_cmd	xcommand,
+	uint			xtype,
+	uint			id,
+	void			*addr)
+{
+	return xfsquotactl(mount->mnt_fd, mount->fs_name, xcommand, xtype, id,
+			addr);
 }

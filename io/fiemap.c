@@ -36,6 +36,7 @@ fiemap_help(void)
 " -a -- prints the attribute fork map instead of the data fork.\n"
 " -l -- also displays the length of each extent in 512-byte blocks.\n"
 " -n -- query n extents.\n"
+" -e -- obtains also delayed allocation extents by not using FIEMAP_FLAG_SYNC.\n"
 " -v -- Verbose information\n"
 " offset is the starting offset to map, and is optional.  If offset is\n"
 " specified, mapping length may (optionally) be specified as well."
@@ -242,7 +243,7 @@ fiemap_f(
 
 	init_cvtnum(&fsblocksize, &fssectsize);
 
-	while ((c = getopt(argc, argv, "aln:v")) != EOF) {
+	while ((c = getopt(argc, argv, "aln:ev")) != EOF) {
 		switch (c) {
 		case 'a':
 			fiemap_flags |= FIEMAP_FLAG_XATTR;
@@ -252,6 +253,10 @@ fiemap_f(
 			break;
 		case 'n':
 			max_extents = atoi(optarg);
+			break;
+		case 'e':
+			/* nosync */
+			fiemap_flags &= ~(FIEMAP_FLAG_SYNC);
 			break;
 		case 'v':
 			vflag++;
@@ -393,7 +398,7 @@ fiemap_init(void)
 	fiemap_cmd.argmin = 0;
 	fiemap_cmd.argmax = -1;
 	fiemap_cmd.flags = CMD_NOMAP_OK | CMD_FOREIGN_OK;
-	fiemap_cmd.args = _("[-alv] [-n nx] [offset [len]]");
+	fiemap_cmd.args = _("[-alev] [-n nx] [offset [len]]");
 	fiemap_cmd.oneline = _("print block mapping for a file");
 	fiemap_cmd.help = fiemap_help;
 

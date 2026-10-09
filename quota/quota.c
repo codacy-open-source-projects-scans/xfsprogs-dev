@@ -53,20 +53,25 @@ quota_mount(
 	char		c[8], h[8], s[8];
 	uint		qflags;
 	int		count;
+	int		ret;
 
-	xfsquotactl(XFS_QSYNC, dev, type, 0, NULL);
-	if (xfsquotactl(XFS_GETQUOTA, dev, type, id, (void *)&d) < 0)
+	xfrog_quotactl(mount, XFS_QSYNC, type, id, NULL);
+	ret = xfrog_quotactl(mount, XFS_GETQUOTA, type, id, &d);
+	if (ret < 0)
 		return 0;
 
 	dquot_fudge_numbers(&d);
 
 	if (!(flags & VERBOSE_FLAG)) {
 		count = 0;
-		if ((form & XFS_BLOCK_QUOTA) && d.d_bcount)
+		if ((form & XFS_BLOCK_QUOTA) &&
+		    (d.d_bcount || d.d_blk_softlimit || d.d_blk_hardlimit))
 			count++;
-		if ((form & XFS_INODE_QUOTA) && d.d_icount)
+		if ((form & XFS_INODE_QUOTA) &&
+		    (d.d_icount || d.d_ino_softlimit || d.d_ino_hardlimit))
 			count++;
-		if ((form & XFS_RTBLOCK_QUOTA) && d.d_rtbcount)
+		if ((form & XFS_RTBLOCK_QUOTA) &&
+		    (d.d_rtbcount || d.d_rtb_softlimit || d.d_rtb_hardlimit))
 			count++;
 		if (!count)
 			return 0;

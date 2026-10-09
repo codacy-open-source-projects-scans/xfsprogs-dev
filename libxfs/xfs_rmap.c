@@ -3,7 +3,7 @@
  * Copyright (c) 2014 Red Hat, Inc.
  * All Rights Reserved.
  */
-#include "libxfs_priv.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -20,6 +20,7 @@
 #include "xfs_rmap_btree.h"
 #include "xfs_trace.h"
 #include "xfs_errortag.h"
+#include "xfs_error.h"
 #include "xfs_inode.h"
 #include "xfs_ag.h"
 #include "xfs_health.h"
@@ -2779,7 +2780,7 @@ xfs_rmap_map_extent(
 	if (whichfork != XFS_ATTR_FORK && xfs_is_reflink_inode(ip))
 		type = XFS_RMAP_MAP_SHARED;
 
-	__xfs_rmap_add(tp, type, ip->i_ino, isrt, whichfork, PREV);
+	__xfs_rmap_add(tp, type, I_INO(ip), isrt, whichfork, PREV);
 }
 
 /* Unmap an extent out of a file. */
@@ -2799,7 +2800,7 @@ xfs_rmap_unmap_extent(
 	if (whichfork != XFS_ATTR_FORK && xfs_is_reflink_inode(ip))
 		type = XFS_RMAP_UNMAP_SHARED;
 
-	__xfs_rmap_add(tp, type, ip->i_ino, isrt, whichfork, PREV);
+	__xfs_rmap_add(tp, type, I_INO(ip), isrt, whichfork, PREV);
 }
 
 /*
@@ -2825,7 +2826,7 @@ xfs_rmap_convert_extent(
 	if (whichfork != XFS_ATTR_FORK && xfs_is_reflink_inode(ip))
 		type = XFS_RMAP_CONVERT_SHARED;
 
-	__xfs_rmap_add(tp, type, ip->i_ino, isrt, whichfork, PREV);
+	__xfs_rmap_add(tp, type, I_INO(ip), isrt, whichfork, PREV);
 }
 
 /* Schedule the creation of an rmap for non-file data. */

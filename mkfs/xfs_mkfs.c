@@ -18,17 +18,18 @@
 #include "proto.h"
 #include <ini.h>
 
-#define TERABYTES(count, blog)	((uint64_t)(count) << (40 - (blog)))
-#define GIGABYTES(count, blog)	((uint64_t)(count) << (30 - (blog)))
-#define MEGABYTES(count, blog)	((uint64_t)(count) << (20 - (blog)))
+/* Convert a quantity of mega/giga/terabytes into units of blocks */
+#define TERABLOCKS(count, blog)	((uint64_t)(count) << (40 - (blog)))
+#define GIGABLOCKS(count, blog)	((uint64_t)(count) << (30 - (blog)))
+#define MEGABLOCKS(count, blog)	((uint64_t)(count) << (20 - (blog)))
 
 /*
- * Realistically, the log should never be smaller than 64MB.  Studies by the
+ * Realistically, the log should never be smaller than 64MiB.  Studies by the
  * kernel maintainer in early 2022 have shown a dramatic reduction in long tail
  * latency of the xlog grant head waitqueue when running a heavy metadata
- * update workload when the log size is at least 64MB.
+ * update workload when the log size is at least 64MiB.
  */
-#define XFS_MIN_REALISTIC_LOG_BLOCKS(blog)	(MEGABYTES(64, (blog)))
+#define XFS_MIN_REALISTIC_LOG_BLOCKS(blog)	(MEGABLOCKS(64, (blog)))
 
 /*
  * Use this macro before we have superblock and mount structure to
@@ -60,6 +61,8 @@ enum {
 
 enum {
 	C_OPTFILE = 0,
+	C_MAKECFG,
+	C_DEFOPTFILE,
 	C_MAX_OPTS,
 };
 
@@ -311,10 +314,20 @@ static struct opt_params copts = {
 	.name = 'c',
 	.subopts = {
 		[C_OPTFILE] = "options",
+		[C_MAKECFG] = "makecfg",
+		[C_DEFOPTFILE] = "defaults",
 		[C_MAX_OPTS] = NULL,
 	},
 	.subopt_params = {
 		{ .index = C_OPTFILE,
+		  .conflicts = { { NULL, LAST_CONFLICT } },
+		  .defaultval = SUBOPT_NEEDS_VAL,
+		},
+		{ .index = C_MAKECFG,
+		  .conflicts = { { NULL, LAST_CONFLICT } },
+		  .defaultval = SUBOPT_NEEDS_VAL,
+		},
+		{ .index = C_DEFOPTFILE,
 		  .conflicts = { { NULL, LAST_CONFLICT } },
 		  .defaultval = SUBOPT_NEEDS_VAL,
 		},
@@ -557,7 +570,7 @@ static struct opt_params iopts = {
 		  .conflicts = { { NULL, LAST_CONFLICT } },
 		  .convert = true,
 		  .minval = 1,
-		  .maxval = 1ULL << 30, /* 1GiB */
+		  .maxval = GIGABYTES(1),
 		  .defaultval = SUBOPT_NEEDS_VAL,
 		},
 	},
@@ -975,7 +988,7 @@ static struct opt_params mopts = {
 		  .defaultval = 1,
 		},
 		{ .index = M_PQUOTA,
-		  .conflicts = { { &mopts, M_GQNOENFORCE },
+		  .conflicts = { { &mopts, M_PQNOENFORCE },
 				 { NULL, LAST_CONFLICT } },
 		  .minval = 0,
 		  .maxval = 1,
@@ -1070,7 +1083,9 @@ struct cli_params {
 	int	blocksize;
 
 	char	*cfgfile;
+	char	*defcfgfile;
 	char	*protofile;
+	char	*makecfg;
 
 	enum fsprop_autofsck autofsck;
 
@@ -1206,7 +1221,7 @@ usage( void )
 {
 	fprintf(stderr, _("Usage: %s\n\
 /* blocksize */		[-b size=num]\n\
-/* config file */	[-c options=xxx]\n\
+/* config file */	[-c options=path,makecfg=path,defaults=path\n\
 /* metadata */		[-m crc=0|1,finobt=0|1,uuid=xxx,rmapbt=0|1,reflink=0|1,\n\
 			    inobtcount=0|1,bigtime=0|1,autofsck=xxx,\n\
 			    metadir=0|1]\n\
@@ -1575,7 +1590,7 @@ discard_blocks(int fd, uint64_t nsectors, int quiet)
 {
 	uint64_t	offset = 0;
 	/* Discard the device 2G at a time */
-	const uint64_t	step = 2ULL << 30;
+	const uint64_t	step = GIGABYTES(2);
 	const uint64_t	count = BBTOB(nsectors);
 
 	/*
@@ -1785,6 +1800,33 @@ cfgfile_opts_parser(
 	switch (subopt) {
 	case C_OPTFILE:
 		cli->cfgfile = getstr(value, opts, subopt);
+		break;
+	case C_MAKECFG:
+		cli->makecfg = getstr(value, opts, subopt);
+		break;
+	case C_DEFOPTFILE:
+		/* already processed by defcfgfile_opts_parser; ignored */
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int
+defcfgfile_opts_parser(
+	struct opt_params	*opts,
+	int			subopt,
+	const char		*value,
+	struct cli_params	*cli)
+{
+	switch (subopt) {
+	case C_OPTFILE:
+	case C_MAKECFG:
+		/* will be processed by cfgfile_opts_parser; ignored */
+		break;
+	case C_DEFOPTFILE:
+		cli->defcfgfile = getstr(value, opts, subopt);
 		break;
 	default:
 		return -EINVAL;
@@ -2252,13 +2294,15 @@ sector_opts_parser(
 	return 0;
 }
 
-static struct subopts {
+struct subopts {
 	struct opt_params *opts;
 	int		(*parser)(struct opt_params	*opts,
 				  int			subopt,
 				  const char		*value,
 				  struct cli_params	*cli);
-} subopt_tab[] = {
+};
+
+static const struct subopts subopt_tab[] = {
 	{ &bopts, block_opts_parser },
 	{ &copts, cfgfile_opts_parser },
 	{ &dopts, data_opts_parser },
@@ -2272,15 +2316,21 @@ static struct subopts {
 	{ NULL, NULL },
 };
 
+static const struct subopts defcfg_subopt_tab[] = {
+	{ &copts, defcfgfile_opts_parser },
+	{ NULL, NULL },
+};
+
 static void
 parse_subopts(
-	char		opt,
-	char		*arg,
-	struct cli_params *cli)
+	char			opt,
+	char			*arg,
+	const struct subopts	*stab,
+	struct cli_params	*cli)
 {
-	struct subopts	*sop = &subopt_tab[0];
-	char		*p;
-	int		ret = 0;
+	const struct subopts	*sop = stab;
+	char			*p, *duparg;
+	int			ret = 0;
 
 	while (sop->opts) {
 		if (sop->opts->name == opt)
@@ -2292,7 +2342,14 @@ parse_subopts(
 	if (!sop->opts)
 		return;
 
-	p = arg;
+	/* getsubopt modifies duparg */
+	duparg = strdup(arg);
+	if (!duparg) {
+		perror("allocating memory");
+		exit(1);
+	}
+
+	p = duparg;
 	while (*p != '\0') {
 		char	**subopts = (char **)sop->opts->subopts;
 		char	*value;
@@ -2304,19 +2361,20 @@ parse_subopts(
 		if (ret)
 			unknown(opt, value);
 	}
+	free(duparg);
 }
 
 static bool
 parse_cfgopt(
-	const char	*section,
-	const char	*name,
-	const char	*value,
-	struct cli_params *cli)
+	const char		*section,
+	const char		*name,
+	const char		*value,
+	struct cli_params	*cli)
 {
-	struct subopts	*sop = &subopt_tab[0];
-	char		**subopts;
-	int		ret = 0;
-	int		i;
+	const struct subopts	*sop = &subopt_tab[0];
+	char			**subopts;
+	int			ret = 0;
+	int			i;
 
 	while (sop->opts) {
 		if (sop->opts->ini_section[0] != '\0' &&
@@ -3433,19 +3491,19 @@ validate_supported(
 		return;
 
 	/*
-	 * We don't support filesystems smaller than 300MB anymore.  Tiny
+	 * We don't support filesystems smaller than 300MiB anymore.  Tiny
 	 * filesystems have never been XFS' design target.  This limit has been
 	 * carefully calculated to prevent formatting with a log smaller than
 	 * the "realistic" size.
 	 *
-	 * If the realistic log size is 64MB, there are four AGs, and the log
+	 * If the realistic log size is 64MiB, there are four AGs, and the log
 	 * AG should be at least 1/8 free after formatting, this gives us:
 	 *
-	 * 64MB * (8 / 7) * 4 = 293MB
+	 * 64MiB * (8 / 7) * 4 = 293MiB
 	 */
-	if (mp->m_sb.sb_dblocks < MEGABYTES(300, mp->m_sb.sb_blocklog)) {
+	if (mp->m_sb.sb_dblocks < MEGABLOCKS(300, mp->m_sb.sb_blocklog)) {
 		fprintf(stderr,
- _("Filesystem must be larger than 300MB.\n"));
+ _("Filesystem must be larger than 300MiB.\n"));
 		usage();
 	}
 
@@ -3455,8 +3513,25 @@ validate_supported(
 	 */
 	if (mp->m_sb.sb_logblocks <
 			XFS_MIN_REALISTIC_LOG_BLOCKS(mp->m_sb.sb_blocklog)) {
-		fprintf(stderr,
- _("Log size must be at least 64MB.\n"));
+		/*
+		 * An internal log must fit within a single allocation group.
+		 * If the user specified the AG geometry but didn't ask for a
+		 * specific log size, the undersized log is due to allocation
+		 * groups that are too small, not a log size the user chose.
+		 */
+		if (cli->loginternal &&
+		    !cli_opt_set(&lopts, L_SIZE) &&
+		    (cli_opt_set(&dopts, D_AGCOUNT) ||
+		     cli_opt_set(&dopts, D_AGSIZE))) {
+			fprintf(stderr,
+ _("Allocation group size (%lld MiB) is too small to hold the minimum 64MiB log.\n"
+   "Specify fewer or larger allocation groups, or use a larger data device.\n"),
+				(long long)XFS_FSB_TO_B(mp,
+					mp->m_sb.sb_agblocks) >> 20);
+		} else {
+			fprintf(stderr,
+ _("Log size must be at least 64MiB.\n"));
+		}
 		usage();
 	}
 
@@ -3559,7 +3634,7 @@ _("%s: Volume reports invalid stripe unit (%d) and stripe width (%d), ignoring.\
 				BBTOB(ft->data.sunit), BBTOB(ft->data.swidth));
 			ft->data.sunit = 0;
 			ft->data.swidth = 0;
-		} else if (cfg->dblocks < GIGABYTES(1, cfg->blocklog)) {
+		} else if (cfg->dblocks < GIGABLOCKS(1, cfg->blocklog)) {
 			/*
 			 * Don't use automatic stripe detection if the device
 			 * size is less than 1GB because the performance gains
@@ -4056,7 +4131,7 @@ calc_concurrency_ag_geometry(
 	 */
 	try_threads = nr_threads;
 	try_agsize = cfg->dblocks / try_threads;
-	if (try_agsize < GIGABYTES(4, cfg->blocklog)) {
+	if (try_agsize < GIGABLOCKS(4, cfg->blocklog)) {
 		do {
 			try_threads--;
 			if (try_threads <= def_agcount) {
@@ -4065,7 +4140,7 @@ calc_concurrency_ag_geometry(
 			}
 
 			try_agsize = cfg->dblocks / try_threads;
-		} while (try_agsize < GIGABYTES(4, cfg->blocklog));
+		} while (try_agsize < GIGABLOCKS(4, cfg->blocklog));
 		goto out;
 	}
 
@@ -4413,7 +4488,7 @@ calc_concurrency_rtgroup_geometry(
 	 */
 	try_threads = nr_threads;
 	try_rgsize = cfg->rtblocks / try_threads;
-	if (try_rgsize < GIGABYTES(4, cfg->blocklog)) {
+	if (try_rgsize < GIGABLOCKS(4, cfg->blocklog)) {
 		do {
 			try_threads--;
 			if (try_threads <= def_rgcount) {
@@ -4422,7 +4497,7 @@ calc_concurrency_rtgroup_geometry(
 			}
 
 			try_rgsize = cfg->rtblocks / try_threads;
-		} while (try_rgsize < GIGABYTES(4, cfg->blocklog));
+		} while (try_rgsize < GIGABLOCKS(4, cfg->blocklog));
 		goto out;
 	}
 
@@ -4516,7 +4591,7 @@ _("rgsize (%s) not a multiple of fs blk size (%d)\n"),
 		 * If nobody specified a realtime device or the rtgroup size,
 		 * try 1TB, rounded down to the nearest rt extent.
 		 */
-		cfg->rgsize = TERABYTES(1, cfg->blocklog);
+		cfg->rgsize = TERABLOCKS(1, cfg->blocklog);
 		cfg->rgsize -= cfg->rgsize % cfg->rtextblocks;
 		cfg->rgcount = 0;
 	} else if (cfg->rtblocks < cfg->rtextblocks * 2) {
@@ -4651,7 +4726,7 @@ _("rgsize (%s) not a multiple of fs blk size (%d)\n"),
 					(cfg->rtblocks % cfg->rgcount != 0);
 		} else {
 			/* 256MB zones just like typical SMR HDDs */
-			cfg->rgsize = MEGABYTES(256, cfg->blocklog);
+			cfg->rgsize = MEGABLOCKS(256, cfg->blocklog);
 			cfg->rgcount = cfg->rtblocks / cfg->rgsize +
 					(cfg->rtblocks % cfg->rgsize != 0);
 		}
@@ -4692,9 +4767,9 @@ calculate_imaxpct(
 	 *  - under  1 TB, use XFS_DFL_IMAXIMUM_PCT (25%).
 	 */
 
-	if (cfg->dblocks < TERABYTES(1, cfg->blocklog))
+	if (cfg->dblocks < TERABLOCKS(1, cfg->blocklog))
 		cfg->imaxpct = XFS_DFL_IMAXIMUM_PCT;
-	else if (cfg->dblocks < TERABYTES(50, cfg->blocklog))
+	else if (cfg->dblocks < TERABLOCKS(50, cfg->blocklog))
 		cfg->imaxpct = 5;
 	else
 		cfg->imaxpct = 1;
@@ -5016,7 +5091,7 @@ calc_concurrency_logblocks(
 	 * If this filesystem is smaller than a gigabyte, there's little to be
 	 * gained from making the log larger.
 	 */
-	if (cfg->dblocks < GIGABYTES(1, cfg->blocklog))
+	if (cfg->dblocks < GIGABLOCKS(1, cfg->blocklog))
 		goto out;
 
 	/*
@@ -5279,7 +5354,7 @@ _("max log size %d smaller than min log size %d, filesystem is too small\n"),
 				XFS_MIN_REALISTIC_LOG_BLOCKS(cfg->blocklog));
 
 		/* And for a tiny filesystem, use the absolute minimum size */
-		if (cfg->dblocks < MEGABYTES(300, cfg->blocklog))
+		if (cfg->dblocks < MEGABLOCKS(300, cfg->blocklog))
 			cfg->logblocks = min_logblocks;
 
 		/* Ensure the chosen size fits within log size requirements */
@@ -5776,6 +5851,64 @@ cfgfile_parse(
 }
 
 static void
+reset_seen(
+	struct opt_params	*opts)
+{
+	unsigned int		i;
+
+	for (i = 0; i < MAX_SUBOPTS; i++) {
+		opts->subopt_params[i].seen = false;
+		opts->subopt_params[i].str_seen = false;
+	}
+}
+
+static void
+defcfgfile_parse(
+	struct cli_params	*cli)
+{
+	int			error;
+
+	if (!cli->defcfgfile)
+		return;
+
+	error = ini_parse(cli->defcfgfile, cfgfile_parse_ini, cli);
+	if (error) {
+		if (error > 0) {
+			fprintf(stderr,
+		_("%s: Unrecognised input on line %d. Aborting.\n"),
+				cli->defcfgfile, error);
+		} else if (error == -1) {
+			fprintf(stderr,
+		_("Unable to open defaults config file %s. Aborting.\n"),
+				cli->defcfgfile);
+		} else if (error == -2) {
+			fprintf(stderr,
+		_("Memory allocation failure parsing %s. Aborting.\n"),
+				cli->defcfgfile);
+		} else {
+			fprintf(stderr,
+		_("Unknown error %d opening defaults config file %s. Aborting.\n"),
+				error, cli->defcfgfile);
+		}
+		exit(1);
+	}
+	printf(_("Parameters parsed from defaults config file %s successfully\n"),
+		cli->defcfgfile);
+
+	/* Now make it look like we haven't seen any cli options. */
+	reset_seen(&bopts);
+	reset_seen(&copts);
+	reset_seen(&dopts);
+	reset_seen(&iopts);
+	reset_seen(&lopts);
+	reset_seen(&mopts);
+	reset_seen(&nopts);
+	reset_seen(&popts);
+	reset_seen(&ropts);
+	reset_seen(&sopts);
+}
+
+static void
 set_autofsck(
 	struct xfs_mount	*mp,
 	struct cli_params	*cli)
@@ -6030,8 +6163,19 @@ main(
 	memcpy(&cli.sb_feat, &dft.sb_feat, sizeof(cli.sb_feat));
 	memcpy(&cli.fsx, &dft.fsx, sizeof(cli.fsx));
 
-	while ((c = getopt_long(argc, argv, "b:c:d:i:l:L:m:n:KNp:qr:s:CfV",
-					long_options, &option_index)) != EOF) {
+#define MKFS_GETOPT_STRING "b:c:d:i:l:L:m:n:KNp:qr:s:CfV"
+	/* Load default configuration, if specified */
+	while ((c = getopt_long(argc, argv, MKFS_GETOPT_STRING,
+				long_options, &option_index)) != EOF) {
+		if (c == 'c')
+			parse_subopts(c, optarg, defcfg_subopt_tab, &cli);
+	}
+	defcfgfile_parse(&cli);
+	optind = 1;
+
+	/* Do the real option parsing */
+	while ((c = getopt_long(argc, argv, MKFS_GETOPT_STRING,
+				long_options, &option_index)) != EOF) {
 		switch (c) {
 		case 0:
 			break;
@@ -6049,7 +6193,7 @@ main(
 		case 'p':
 		case 'r':
 		case 's':
-			parse_subopts(c, optarg, &cli);
+			parse_subopts(c, optarg, subopt_tab, &cli);
 			break;
 		case 'L':
 			if (strlen(optarg) > sizeof(sbp->sb_fname))
@@ -6087,6 +6231,10 @@ main(
 	 */
 	cfgfile_parse(&cli);
 
+	/* Don't create anything if we're merely generating a config file */
+	if (cli.makecfg)
+		dry_run = 1;
+
 	/*
 	 * Extract as much of the valid config as we can from the CLI input
 	 * before opening the libxfs devices.
@@ -6104,6 +6252,15 @@ main(
 	validate_log_sectorsize(&cfg, &cli, &dft, &ft);
 	validate_zoned(&cfg, &cli, &dft, &zt);
 	validate_sb_features(&cfg, &cli);
+
+	/*
+	 * If the filesystem has full backreferences and the user didn't
+	 * express an autofsck preference, enable online repair because they
+	 * might as well get some useful functionality from the extra metadata.
+	 */
+	if (cli.autofsck == FSPROP_AUTOFSCK_UNSET &&
+	    cli.sb_feat.rmapbt && cli.sb_feat.parent_pointers)
+		cli.autofsck = FSPROP_AUTOFSCK_REPAIR;
 
 	/*
 	 * we've now completed basic validation of the features, sector and
@@ -6186,6 +6343,29 @@ main(
 	validate_cowextsize_hint(mp, &cli);
 
 	validate_supported(mp, &cli);
+
+	if (cli.makecfg) {
+		struct xfs_fsop_geom	geo;
+		FILE			*fp;
+
+		fp = fopen(cli.makecfg, "w+");
+		if (!fp) {
+			perror(cli.makecfg);
+			exit(1);
+		}
+
+		libxfs_fs_geometry(mp, &geo, XFS_FS_GEOM_MAX_STRUCT_VER);
+		error = xfrog_write_mkfs_config(&geo, cli.sb_feat.qflags,
+				&cli.fsx, cli.autofsck, fp);
+		if (!error)
+			error = fclose(fp);
+		if (error) {
+			perror(cli.makecfg);
+			exit(1);
+		}
+
+		exit(0);
+	}
 
 	/* Print the intended geometry of the fs. */
 	if (!quiet || dry_run) {

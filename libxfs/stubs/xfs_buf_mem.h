@@ -6,6 +6,8 @@
 #ifndef __XFS_BUF_MEM_H__
 #define __XFS_BUF_MEM_H__
 
+#include "xfile.h"
+
 extern unsigned int		XMBUF_BLOCKSIZE;
 extern unsigned int		XMBUF_BLOCKSHIFT;
 

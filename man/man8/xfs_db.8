@@ -849,14 +849,24 @@ command to convert to and from this form. Block numbers given for file blocks
 .B bmap
 command) are in this form.
 .TP
-.BI "fsmap [ " start " ] [ " end " ]
+.BI "fsmap [\-r] [" start " [" end ]]
 Prints the mapping of disk blocks used by an XFS filesystem.  The map
 lists each extent used by files, allocation group metadata,
 journalling logs, and static filesystem metadata, as well as any
 regions that are unused.  All blocks, offsets, and lengths are specified
 in units of 512-byte blocks, no matter what the filesystem's block size is.
-.BI "The optional " start " and " end " arguments can be used to constrain
-the output to a particular range of disk blocks.
+.IP
+The optional
+.I start
+and
+.I end
+arguments can be used to constrain the output to a particular range of disk
+blocks.
+.IP
+When the
+.B \-r
+option is specified, prints the reverse mapping for the real-time device
+instead of the data device.
 .TP
 .BI "fuzz [\-c] [\-d] " "field action"
 Write garbage into a specific structure field on disk.
@@ -958,6 +968,13 @@ Seed the random number generator with this value.
 .TP
 .BI "help [" command ]
 Print help for one or all commands.
+.TP
+.BI "makecfg [" path ]
+Write a configuration file to the given path that can be re-read by mkfs.xfs
+for a future filesystem format attempt.
+This file will contain only user-visible features.
+Filesystem geometry information is not written to the configuration file.
+If no path is given, the configuration will be printed on standard output.
 .TP
 .B info
 Displays selected geometry information about the filesystem.

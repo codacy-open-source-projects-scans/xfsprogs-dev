@@ -15,6 +15,7 @@
 #include "bulkload.h"
 #include "bmap_repair.h"
 #include "libfrog/util.h"
+#include "libfrog/convert.h"
 
 /*
  * Inode Fork Block Mapping (BMBT) Repair
@@ -133,7 +134,7 @@ xrep_bmap_walk_rmap(
 	int				error;
 
 	/* Skip extents which are not owned by this inode and fork. */
-	if (rec->rm_owner != rb->sc->ip->i_ino)
+	if (rec->rm_owner != I_INO(rb->sc->ip))
 		return 0;
 
 	error = xrep_bmap_check_fork_rmap(rb, cur, rec);
@@ -251,7 +252,7 @@ xrep_bmap_walk_rtrmap(
 	int				error = 0;
 
 	/* Skip extents which are not owned by this inode and fork. */
-	if (rec->rm_owner != rb->sc->ip->i_ino)
+	if (rec->rm_owner != I_INO(rb->sc->ip))
 		return 0;
 
 	error = xrep_bmap_check_rtfork_rmap(rb->sc, cur, rec);
@@ -499,7 +500,7 @@ xrep_bmap_btree_load(
 	rb->bmap_bload.get_records = xrep_bmap_get_records;
 	rb->bmap_bload.claim_block = xrep_bmap_claim_block;
 	rb->bmap_bload.iroot_size = xrep_bmap_iroot_size;
-	rb->bmap_bload.max_dirty = XFS_B_TO_FSBT(sc->mp, 256U << 10); /* 256K */
+	rb->bmap_bload.max_dirty = XFS_B_TO_FSBT(sc->mp, KILOBYTES(256));
 
 	/*
 	 * Always make the btree as small as possible, since we might need the
@@ -575,7 +576,7 @@ xrep_bmap_build_new_fork(
 	 * Prepare to construct the new fork by initializing the new btree
 	 * structure and creating a fake ifork in the ifakeroot structure.
 	 */
-	libxfs_rmap_ino_bmbt_owner(&oinfo, sc->ip->i_ino, rb->whichfork);
+	xfs_rmap_inode_bmbt_owner(&oinfo, sc->ip, rb->whichfork);
 	bulkload_init_inode(&rb->new_fork_info, sc, rb->whichfork, &oinfo);
 	bmap_cur = libxfs_bmbt_init_cursor(sc->mp, NULL, sc->ip,
 			XFS_STAGING_FORK);
@@ -739,6 +740,7 @@ rebuild_bmap(
 		.mp		= mp,
 	};
 	const struct xfs_buf_ops *bp_ops;
+	struct xfs_perag	*pag;
 	unsigned long		boffset;
 	unsigned long long	resblks;
 	xfs_daddr_t		bp_bn;
@@ -820,7 +822,10 @@ rebuild_bmap(
 	 * Rebuilding the inode fork rolled the transaction, so we need to
 	 * re-grab the inode cluster buffer and dinode pointer for the caller.
 	 */
-	err2 = -libxfs_imap_to_bp(mp, NULL, &sc.ip->i_imap, ino_bpp);
+	pag = libxfs_perag_get(mp, XFS_INODE_TO_AGNO(sc.ip));
+	err2 = -libxfs_read_icluster(pag, NULL, sc.ip->i_imap.im_agbno,
+			ino_bpp);
+	libxfs_perag_put(pag);
 	if (err2)
 		do_error(
  _("Unable to re-grab inode cluster buffer after failed repair of inode %llu, error %d.\n"),

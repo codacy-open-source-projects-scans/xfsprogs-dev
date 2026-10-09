@@ -140,7 +140,7 @@ rmltdep:
 	$(Q)rm -f .ltdep
 
 .ltdep: $(CFILES) $(HFILES)
-	$(Q)$(MAKEDEP) $(CFILES) | $(SED) -e 's,^\([^:]*\)\.o,\1.lo,' > .ltdep
+	$(Q)$(MAKEDEP) $(CFILES) | $(SED) -e 's,^\([^:]*\)\.o:,\1.lo:,' > .ltdep
 
 depend: rmdep .dep
 

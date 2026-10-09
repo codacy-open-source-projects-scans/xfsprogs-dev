@@ -12,6 +12,7 @@
 #include "libfrog/paths.h"
 #include "libfrog/workqueue.h"
 #include "libfrog/histogram.h"
+#include "libfrog/convert.h"
 #include "xfs_scrub.h"
 #include "common.h"
 #include "progress.h"
@@ -51,7 +52,7 @@ fstrim_ok(
  * call so that we can implement decent progress reporting and CPU resource
  * control.  Pick a prime number of gigabytes for interest.
  */
-#define FSTRIM_MAX_BYTES	(11ULL << 30)
+#define FSTRIM_MAX_BYTES	GIGABYTES(11)
 
 /* Trim a certain range of the filesystem. */
 static int
@@ -140,7 +141,6 @@ fstrim_compute_minlen(
 	const struct histogram	*freesp_hist)
 {
 	uint64_t		ret;
-	double			blk_threshold = 0;
 	unsigned int		ag_max_usable;
 
 	/*
@@ -148,7 +148,7 @@ fstrim_compute_minlen(
 	 * We can't calculate or query that value directly, so we guesstimate
 	 * that it's 95% of the AG size.
 	 */
-	ag_max_usable = ctx->mnt.fsgeom.agblocks * 95 / 100;
+	ag_max_usable = (uint64_t)ctx->mnt.fsgeom.agblocks * 95 / 100;
 
 	if (debug > 1) {
 		struct histogram_strings hstr = {
@@ -163,9 +163,9 @@ fstrim_compute_minlen(
 			freesp_hist->tot_sum * ctx->fstrim_block_pct);
 
 	if (debug > 1)
-		printf(_("fstrim minlen %lld threshold %lld ag_max_usable %u\n"),
+		printf(_("fstrim minlen %lld threshold %.2f ag_max_usable %u\n"),
 				(unsigned long long)ret,
-				(unsigned long long)blk_threshold,
+				freesp_hist->tot_sum * ctx->fstrim_block_pct,
 				ag_max_usable);
 	if (ret > ag_max_usable)
 		ret = ag_max_usable;
